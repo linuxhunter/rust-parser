@@ -24,6 +24,7 @@ pub enum BerData {
     OCTET_STRING(String),
     NULL(u8),
     OID(Vec<u32>),
+    VAR_LENGHED(Vec<u8>),
 }
 
 pub fn parse_ber_type(input: &[u8]) -> IResult<&[u8], u8> {
@@ -46,6 +47,13 @@ pub fn parse_ber_length(input: &[u8]) -> IResult<&[u8], u32> {
         let mut rem = &input[1..];
         let mut length = 0;
         match k {
+            0 => {
+                if input[input.len() - 1] != 0 || input[input.len() - 2] != 0 {
+                    return Err(Err::Error(make_error(input, ErrorKind::Verify)));
+                } else {
+                    length = (input.len() - 3) as u32;
+                }
+            }
             1 => {
                 let (tmp_rem, tmp_length) = be_u8(rem)?;
                 rem = tmp_rem;
@@ -254,6 +262,12 @@ pub fn parse_ber_sequence(input: &[u8]) -> IResult<&[u8], Vec<BerData>> {
     Ok((rem, ber_data))
 }
 
+pub fn parse_ber_variable_length(input: &[u8], length: u32) -> IResult<&[u8], Vec<u8>> {
+    let variable_data = input[0..length as usize].to_vec();
+    let rem = &input[(length+1) as usize ..];
+    Ok((rem, variable_data))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -277,6 +291,9 @@ mod tests {
         0x05, 0x00,
         0x06, 0x08, 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x02, 0x05
     ];
+    const BER_VARIABLE_LENGTH_VALUE: &[u8] = &[0x02, 0x80, 0xFF, 0x00, 0x00];
+    const BER_VARIABLE_LENGTH_VALUE2: &[u8] = &[0x02, 0x80, 0x05, 0xDC, 0x00, 0x00];
+    const BER_VARIABLE_LENGTH_VALUE3: &[u8] = &[0x02, 0x80, 0x05, 0xDC, 0x00, 0x01];
     #[test]
     fn test_ber_bool_true() {
         let (rem, data_type) = parse_ber_type(BER_BOOL_TRUE).unwrap();
@@ -395,4 +412,39 @@ mod tests {
             BerData::OID(vec![1, 2, 840, 113549, 2, 5])
         ]);
     }
+    #[test]
+    fn test_ber_variable_length_value() {
+        let (rem, data_type) = parse_ber_type(BER_VARIABLE_LENGTH_VALUE).unwrap();
+        assert_eq!(data_type, BER_TYPE_INTEGER);
+        let (rem, data_length) = parse_ber_length(rem).unwrap();
+        assert_eq!(data_length, 1u32);
+        let (rem, data_value) = parse_ber_variable_length(rem, data_length).unwrap();
+        assert_eq!(data_value, vec![0xFF]);
+    }
+    #[test]
+    fn test_ber_variable_length_value2() {
+        let (rem, data_type) = parse_ber_type(BER_VARIABLE_LENGTH_VALUE2).unwrap();
+        assert_eq!(data_type, BER_TYPE_INTEGER);
+        let (rem, data_length) = parse_ber_length(rem).unwrap();
+        assert_eq!(data_length, 2u32);
+        let (rem, data_value) = parse_ber_variable_length(rem, data_length).unwrap();
+        assert_eq!(data_value, vec![0x05, 0xDC]);
+    }
+    #[test]
+    fn test_ber_variable_length_value3() {
+        let (rem, data_type) = parse_ber_type(BER_VARIABLE_LENGTH_VALUE3).unwrap();
+        assert_eq!(data_type, BER_TYPE_INTEGER);
+        match parse_ber_length(rem) {
+            Ok((_, _)) => {
+                panic!("should not reach here");
+            },
+            Err(Err::Error(e)) => {
+                assert_eq!(e.code, ErrorKind::Verify);
+            },
+            _ => {
+                panic!("should not reach here")
+            }
+        }
+    }
+
 }
