@@ -1,6 +1,6 @@
 use std::{net::Ipv4Addr, str::FromStr};
 
-use nom7::{IResult, number::complete::{be_u32, be_u8, be_u16, be_u24}, combinator::map_res, Err, error::{make_error, ErrorKind}, sequence::tuple, bytes::complete::{take_until, tag, take_while}};
+use nom7::{IResult, number::complete::{be_u32, be_u8, be_u16, be_u24}, combinator::map_res, Err, error::{make_error, ErrorKind}, sequence::tuple, bytes::streaming::take};
 
 #[derive(Debug, PartialEq)]
 pub enum MethodOrEventID {
@@ -195,7 +195,7 @@ pub struct SomeIpSdHeader {
     length_entries: u32,
     entries_array: Vec<SomeIpSdEntry>,
     length_options: u32,
-    options_array: Vec<SomeIpSdOption>,
+    options_array: Option<Vec<SomeIpSdOption>>,
 }
 
 pub fn parse_some_ip_header(input: &[u8]) -> IResult<&[u8], SomeIPHeader> {
@@ -295,7 +295,7 @@ pub fn parse_some_ip_sd_option(input: &[u8], _length_options: u32) -> IResult<&[
             be_u16,
             map_res(be_u8, |data| SomeIpSdOptionType::from_u8(data)),
             be_u8,
-            map_res(take_while(|c| c != 0), transform_vec_to_ipv4addr),
+            map_res(take(4usize), transform_vec_to_ipv4addr),
             be_u8,
             be_u8,
             be_u16
@@ -317,8 +317,14 @@ pub fn parse_some_ip_sd_header(input: &[u8]) -> IResult<&[u8], SomeIpSdHeader> {
     let (rem, length_entries) = be_u32(rem)?;
     let (rem, entries_array) = parse_some_ip_sd_entries(rem, length_entries)?;
     let (rem, length_options) = be_u32(rem)?;
-    let (rem, options_array) = parse_some_ip_sd_option(rem, length_options)?;
-    Ok((rem, SomeIpSdHeader {
+    let mut last_rem = rem;
+    let mut options_array = None;
+    if length_options > 0 {
+        let (rem, tmp_data) = parse_some_ip_sd_option(rem, length_options)?;
+        last_rem = rem;
+        options_array = Some(tmp_data);
+    }
+    Ok((last_rem, SomeIpSdHeader {
         flags,
         length_entries,
         entries_array,
@@ -402,7 +408,7 @@ mod tests {
                                 }
                             ],
                             length_options: 0x18,
-                            options_array: vec![
+                            options_array: Some(vec![
                                 SomeIpSdOption {
                                     length: 0x0009,
                                     sd_option_type: SomeIpSdOptionType::IPv4_EndPoint,
@@ -415,7 +421,7 @@ mod tests {
                                     ipv4_addr: Ipv4Addr::from_str("192.168.132.131").unwrap(),
                                     l4_protocol: 0x11,
                                 }
-                            ],
+                            ]),
                         })
                     },
                     Err(_) => {
@@ -496,7 +502,7 @@ mod tests {
                                 },
                             ],
                             length_options: 0x18,
-                            options_array: vec![
+                            options_array: Some(vec![
                                 SomeIpSdOption {
                                     length: 0x0009,
                                     sd_option_type: SomeIpSdOptionType::IPv4_EndPoint,
@@ -509,13 +515,411 @@ mod tests {
                                     ipv4_addr: Ipv4Addr::from_str("192.168.132.130").unwrap(),
                                     l4_protocol: 0x11,
                                 },
-                            ],
+                            ]),
                         });
                     },
                     Err(_) => {
                         panic!("should not reach here");
                     }
                 }
+            },
+            Err(_) => {
+                panic!("should not reach here");
+            }
+        }
+    }
+
+    const SOME_IP_SD_FIND_SERVICE: &[u8] = &[
+                    0xff, 0xff, 0x81, 0x00, 0x00, 0x00,
+        0x00, 0x24, 0x00, 0x00, 0x00, 0x18, 0x01, 0x01,
+        0x02, 0x00, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x58,
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0xff, 0xff, 0x00, 0x00, 0x00, 0x00
+    ];
+    #[test]
+    fn test_parse_some_ip_sd_find_service() {
+        match parse_some_ip_header(SOME_IP_SD_FIND_SERVICE) {
+            Ok((rem, header)) => {
+                assert_eq!(header, SomeIPHeader {
+                    message_id: MessageID::from_u32(0xFFFF8100).unwrap(),
+                    length: 0x24,
+                    request_id: RequestID::from_u32(0x00000018).unwrap(),
+                    protocol_version: 0x01,
+                    interface_version: 0x01,
+                    message_type: MessageType::from_u8(0x02).unwrap(),
+                    return_code: 0x00,
+                });
+                match parse_some_ip_sd_header(rem) {
+                    Ok((rem, sd_header)) => {
+                        assert_eq!(rem.len(), 0);
+                        assert_eq!(sd_header, SomeIpSdHeader {
+                            flags: 0xc0,
+                            length_entries: 0x10,
+                            entries_array: vec![
+                                SomeIpSdEntry {
+                                    entry_type: 0x00,
+                                    index_1st_options: 0x00,
+                                    index_2nd_options: 0x00,
+                                    num_of_option_1: 0x00,
+                                    num_of_option_2: 0x00,
+                                    service_id: 0x0058,
+                                    instance_id: 0xffff,
+                                    major_version: 0xff,
+                                    ttl: 16777215,
+                                    last_item: SomeIpSdEntryLastItem::MinorVersion(0xffffffff),
+                                }
+                            ],
+                            length_options: 0x00,
+                            options_array: None,
+                        })
+                    },
+                    Err(_) => {
+                        panic!("should not reach here")
+                    }
+                }
+            },
+            Err(_) => {
+                panic!("should not reach here");
+            }
+        }
+    }
+
+    const SOME_IP_SD_OFFER_SERVICE: &[u8] = &[
+                    0xff, 0xff, 0x81, 0x00, 0x00, 0x00,
+        0x00, 0x3c, 0x00, 0x00, 0x00, 0x1e, 0x01, 0x01,
+        0x02, 0x00, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x10, 0x01, 0x00, 0x00, 0x20, 0x00, 0x58,
+        0x00, 0x63, 0x01, 0x01, 0x51, 0x80, 0x00, 0x00,
+        0x00, 0x01, 0x00, 0x00, 0x00, 0x18, 0x00, 0x09,
+        0x04, 0x00, 0xc0, 0xa8, 0x84, 0x83, 0x00, 0x06,
+        0x77, 0x67, 0x00, 0x09, 0x04, 0x00, 0xc0, 0xa8,
+        0x84, 0x83, 0x00, 0x11, 0x77, 0x25
+    ];
+    #[test]
+    fn test_parse_some_ip_sd_offer_service() {
+        match parse_some_ip_header(SOME_IP_SD_OFFER_SERVICE) {
+            Ok((rem, header)) => {
+                assert_eq!(header, SomeIPHeader {
+                    message_id: MessageID::from_u32(0xFFFF8100).unwrap(),
+                    length: 0x3c,
+                    request_id: RequestID::from_u32(0x0000001e).unwrap(),
+                    protocol_version: 0x01,
+                    interface_version: 0x01,
+                    message_type: MessageType::from_u8(0x02).unwrap(),
+                    return_code: 0x00,
+                });
+                match parse_some_ip_sd_header(rem) {
+                    Ok((rem, sd_header)) => {
+                        assert_eq!(rem.len(), 0);
+                        assert_eq!(sd_header, SomeIpSdHeader {
+                            flags: 0xc0,
+                            length_entries: 0x10,
+                            entries_array: vec![
+                                SomeIpSdEntry {
+                                    entry_type: 0x01,
+                                    index_1st_options: 0x00,
+                                    index_2nd_options: 0x00,
+                                    num_of_option_1: 0x02,
+                                    num_of_option_2: 0x00,
+                                    service_id: 0x0058,
+                                    instance_id: 0x0063,
+                                    major_version: 0x01,
+                                    ttl: 86400,
+                                    last_item: SomeIpSdEntryLastItem::MinorVersion(0x00000001),
+                                }
+                            ],
+                            length_options: 0x18,
+                            options_array: Some(vec![
+                                SomeIpSdOption {
+                                    length: 0x0009,
+                                    sd_option_type: SomeIpSdOptionType::IPv4_EndPoint,
+                                    ipv4_addr: Ipv4Addr::from_str("192.168.132.131").unwrap(),
+                                    l4_protocol: 0x06,
+                                },
+                                SomeIpSdOption {
+                                    length: 0x0009,
+                                    sd_option_type: SomeIpSdOptionType::IPv4_EndPoint,
+                                    ipv4_addr: Ipv4Addr::from_str("192.168.132.131").unwrap(),
+                                    l4_protocol: 0x11,
+                                },
+                            ]),
+                        })
+                    },
+                    Err(_) => {
+                        panic!("should not reach here")
+                    }
+                }
+            },
+            Err(_) => {
+                panic!("should not reach here")
+            }
+        }
+    }
+
+    const SOME_IP_SD_SUBSCRIBE: &[u8] = &[
+                    0xff, 0xff, 0x81, 0x00, 0x00, 0x00,
+        0x00, 0x4c, 0x00, 0x00, 0x00, 0x18, 0x01, 0x01,
+        0x02, 0x00, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x20, 0x06, 0x00, 0x00, 0x20, 0x00, 0x58,
+        0x00, 0x63, 0x01, 0x01, 0x51, 0x80, 0x00, 0x00,
+        0x00, 0x01, 0x06, 0x00, 0x00, 0x20, 0x00, 0x58,
+        0x00, 0x63, 0x01, 0x01, 0x51, 0x80, 0x00, 0x00,
+        0x00, 0x02, 0x00, 0x00, 0x00, 0x18, 0x00, 0x09,
+        0x04, 0x00, 0xc0, 0xa8, 0x84, 0x82, 0x00, 0x06,
+        0xb9, 0x42, 0x00, 0x09, 0x04, 0x00, 0xc0, 0xa8,
+        0x84, 0x82, 0x00, 0x11, 0xb2, 0x3c
+    ];
+    #[test]
+    fn test_parse_some_ip_sd_subscribe() {
+        match parse_some_ip_header(SOME_IP_SD_SUBSCRIBE) {
+            Ok((rem, header)) => {
+                assert_eq!(header, SomeIPHeader {
+                    message_id: MessageID::from_u32(0xFFFF8100).unwrap(),
+                    length: 0x4c,
+                    request_id: RequestID::from_u32(0x00000018).unwrap(),
+                    protocol_version: 0x01,
+                    interface_version: 0x01,
+                    message_type: MessageType::from_u8(0x02).unwrap(),
+                    return_code: 0x00,
+                });
+                match parse_some_ip_sd_header(rem) {
+                    Ok((rem, sd_header)) => {
+                        assert_eq!(rem.len(), 0);
+                        assert_eq!(sd_header, SomeIpSdHeader {
+                            flags: 0xc0,
+                            length_entries: 0x20,
+                            entries_array: vec![
+                                SomeIpSdEntry {
+                                    entry_type: 0x06,
+                                    index_1st_options: 0x00,
+                                    index_2nd_options: 0x00,
+                                    num_of_option_1: 0x02,
+                                    num_of_option_2: 0x00,
+                                    service_id: 0x0058,
+                                    instance_id: 0x0063,
+                                    major_version: 0x01,
+                                    ttl: 86400,
+                                    last_item: SomeIpSdEntryLastItem::EventGroup(SomeIpSdEntrySubscribeEventGroup {
+                                        reserved: 0x00,
+                                        initial_data_request_flag: 0x00,
+                                        eventgroup_id: 0x0001,
+                                    }),
+                                },
+                                SomeIpSdEntry {
+                                    entry_type: 0x06,
+                                    index_1st_options: 0x00,
+                                    index_2nd_options: 0x00,
+                                    num_of_option_1: 0x02,
+                                    num_of_option_2: 0x00,
+                                    service_id: 0x0058,
+                                    instance_id: 0x0063,
+                                    major_version: 0x01,
+                                    ttl: 86400,
+                                    last_item: SomeIpSdEntryLastItem::EventGroup(SomeIpSdEntrySubscribeEventGroup {
+                                        reserved: 0x00,
+                                        initial_data_request_flag: 0x00,
+                                        eventgroup_id: 0x0002,
+                                    }),
+                                }
+                            ],
+                            length_options: 0x18,
+                            options_array: Some(vec![
+                                SomeIpSdOption {
+                                    length: 0x0009,
+                                    sd_option_type: SomeIpSdOptionType::IPv4_EndPoint,
+                                    ipv4_addr: Ipv4Addr::from_str("192.168.132.130").unwrap(),
+                                    l4_protocol: 0x06,
+                                },
+                                SomeIpSdOption {
+                                    length: 0x0009,
+                                    sd_option_type: SomeIpSdOptionType::IPv4_EndPoint,
+                                    ipv4_addr: Ipv4Addr::from_str("192.168.132.130").unwrap(),
+                                    l4_protocol: 0x11,
+                                },
+                            ]),
+                        })
+                    },
+                    Err(_) => {
+                        panic!("should not reach here")
+                    }
+                }
+            },
+            Err(_) => {
+                panic!("should not reach here")
+            }
+        }
+    }
+
+    const SOME_IP_SD_SUBSCRIBE_ACK: &[u8] = &[
+                    0xff, 0xff, 0x81, 0x00, 0x00, 0x00,
+        0x00, 0x40, 0x00, 0x00, 0x00, 0x1f, 0x01, 0x01,
+        0x02, 0x00, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x20, 0x07, 0x00, 0x00, 0x00, 0x00, 0x58,
+        0x00, 0x63, 0x01, 0x01, 0x51, 0x80, 0x00, 0x00,
+        0x00, 0x01, 0x07, 0x00, 0x00, 0x10, 0x00, 0x58,
+        0x00, 0x63, 0x01, 0x01, 0x51, 0x80, 0x00, 0x00,
+        0x00, 0x02, 0x00, 0x00, 0x00, 0x0c, 0x00, 0x09,
+        0x14, 0x00, 0xef, 0xff, 0x00, 0x01, 0x00, 0x11,
+        0x77, 0x26
+    ];
+    #[test]
+    fn test_parse_some_ip_sd_subscirbe_ack() {
+        match parse_some_ip_header(SOME_IP_SD_SUBSCRIBE_ACK) {
+            Ok((rem, header)) => {
+                assert_eq!(header, SomeIPHeader {
+                    message_id: MessageID::from_u32(0xFFFF8100).unwrap(),
+                    length: 0x40,
+                    request_id: RequestID::from_u32(0x0000001f).unwrap(),
+                    protocol_version: 0x01,
+                    interface_version: 0x01,
+                    message_type: MessageType::from_u8(0x02).unwrap(),
+                    return_code: 0x00,
+                });
+                match parse_some_ip_sd_header(rem) {
+                    Ok((rem, sd_header)) => {
+                        assert_eq!(rem.len(), 0);
+                        assert_eq!(sd_header, SomeIpSdHeader {
+                            flags: 0xc0,
+                            length_entries: 0x20,
+                            entries_array: vec![
+                                SomeIpSdEntry {
+                                    entry_type: 0x07,
+                                    index_1st_options: 0x00,
+                                    index_2nd_options: 0x00,
+                                    num_of_option_1: 0x00,
+                                    num_of_option_2: 0x00,
+                                    service_id: 0x0058,
+                                    instance_id: 0x0063,
+                                    major_version: 0x01,
+                                    ttl: 86400,
+                                    last_item: SomeIpSdEntryLastItem::EventGroup(SomeIpSdEntrySubscribeEventGroup {
+                                        reserved: 0x00,
+                                        initial_data_request_flag: 0x00,
+                                        eventgroup_id: 0x0001,
+                                    }),
+                                },
+                                SomeIpSdEntry {
+                                    entry_type: 0x07,
+                                    index_1st_options: 0x00,
+                                    index_2nd_options: 0x00,
+                                    num_of_option_1: 0x01,
+                                    num_of_option_2: 0x00,
+                                    service_id: 0x0058,
+                                    instance_id: 0x0063,
+                                    major_version: 0x01,
+                                    ttl: 86400,
+                                    last_item: SomeIpSdEntryLastItem::EventGroup(SomeIpSdEntrySubscribeEventGroup {
+                                        reserved: 0x00,
+                                        initial_data_request_flag: 0x00,
+                                        eventgroup_id: 0x0002,
+                                    }),
+                                }
+                            ],
+                            length_options: 0x0c,
+                            options_array: Some(vec![
+                                SomeIpSdOption {
+                                    length: 0x0009,
+                                    sd_option_type: SomeIpSdOptionType::Ipv4_MultiCast,
+                                    ipv4_addr: Ipv4Addr::from_str("239.255.0.1").unwrap(),
+                                    l4_protocol: 0x11,
+                                }
+                            ]),
+                        });
+                    },
+                    Err(_) => {
+                        panic!("should not reach here")
+                    }
+                }
+            },
+            Err(_) => {
+                panic!("should not reach here")
+            }
+        }
+    }
+    const SOME_IP_REQUEST: &[u8] = &[
+                    0x00, 0x58, 0x00, 0x17, 0x00, 0x00,
+        0x00, 0x38, 0x00, 0x67, 0x00, 0x03, 0x01, 0x01,
+        0x00, 0x00, 0x00, 0x2e, 0x40, 0x01, 0x00, 0x20,
+        0x00, 0x1e, 0xfe, 0xff, 0x00, 0x48, 0x00, 0x65,
+        0x00, 0x6c, 0x00, 0x6c, 0x00, 0x6f, 0x00, 0x2c,
+        0x00, 0x20, 0x00, 0x77, 0x00, 0x6f, 0x00, 0x72,
+        0x00, 0x6c, 0x00, 0x64, 0x00, 0x21, 0x00, 0x00,
+        0x40, 0x02, 0x00, 0x06, 0x00, 0x04, 0x10, 0x20,
+        0x30, 0x40
+    ];
+    #[test]
+    fn test_parse_some_ip_request() {
+        match parse_some_ip_header(SOME_IP_REQUEST) {
+            Ok((rem, header)) => {
+                assert_eq!(header, SomeIPHeader {
+                    message_id: MessageID::from_u32(0x00580017).unwrap(),
+                    length: 0x38,
+                    request_id: RequestID::from_u32(0x00670003).unwrap(),
+                    protocol_version: 0x01,
+                    interface_version: 0x01,
+                    message_type: MessageType::from_u8(0x00).unwrap(),
+                    return_code: 0x00,
+                });
+                assert_eq!(rem.len(), (header.length - 8) as usize);
+            },
+            Err(_) => {
+                panic!("should not reach here")
+            }
+        }
+    }
+
+    const SOME_IP_RESPONSE: &[u8] = &[
+                    0x00, 0x58, 0x00, 0x17, 0x00, 0x00,
+        0x00, 0x37, 0x00, 0x67, 0x00, 0x03, 0x01, 0x01,
+        0x80, 0x00, 0x01, 0x00, 0x2c, 0xfe, 0xff, 0x00,
+        0x77, 0x00, 0x65, 0x00, 0x6c, 0x00, 0x63, 0x00,
+        0x6f, 0x00, 0x6d, 0x00, 0x65, 0x00, 0x20, 0x00,
+        0x74, 0x00, 0x6f, 0x00, 0x20, 0x00, 0x73, 0x00,
+        0x68, 0x00, 0x65, 0x00, 0x6e, 0x00, 0x79, 0x00,
+        0x61, 0x00, 0x6e, 0x00, 0x67, 0x00, 0x21, 0x00,
+        0x00
+    ];
+    #[test]
+    fn test_parse_some_ip_response() {
+        match parse_some_ip_header(SOME_IP_RESPONSE) {
+            Ok((rem, header)) => {
+                assert_eq!(header, SomeIPHeader {
+                    message_id: MessageID::from_u32(0x00580017).unwrap(),
+                    length: 0x37,
+                    request_id: RequestID::from_u32(0x00670003).unwrap(),
+                    protocol_version: 0x01,
+                    interface_version: 0x01,
+                    message_type: MessageType::from_u8(0x80).unwrap(),
+                    return_code: 0x00,
+                });
+                assert_eq!(rem.len(), (header.length - 8) as usize);
+            },
+            Err(_) => {
+                panic!("should not reach here")
+            }
+        }
+    }
+
+    const SOME_IP_REQUEST_NO_RETURN: &[u8] = &[
+                    0x00, 0x58, 0x00, 0x1c, 0x00, 0x00,
+        0x00, 0x0c, 0x00, 0x67, 0x00, 0x04, 0x01, 0x01,
+        0x01, 0x00, 0x00, 0x00, 0x00, 0x01
+    ];
+    #[test]
+    fn test_parse_some_ip_request_no_return() {
+        match parse_some_ip_header(SOME_IP_REQUEST_NO_RETURN) {
+            Ok((rem, header)) => {
+                assert_eq!(header, SomeIPHeader {
+                    message_id: MessageID::from_u32(0x0058001c).unwrap(),
+                    length: 0x0c,
+                    request_id: RequestID::from_u32(0x00670004).unwrap(),
+                    protocol_version: 0x01,
+                    interface_version: 0x01,
+                    message_type: MessageType::from_u8(0x01).unwrap(),
+                    return_code: 0x00,
+                });
+                assert_eq!(rem.len(), (header.length - 8) as usize);
             },
             Err(_) => {
                 panic!("should not reach here");
