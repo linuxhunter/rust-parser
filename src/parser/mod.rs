@@ -4,3 +4,4 @@ pub mod dns;
 pub mod some_ip;
 pub mod doip;
 pub mod ftp;
+pub mod dhcp;
