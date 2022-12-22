@@ -1,11 +1,13 @@
 use nom7::combinator::verify;
-use nom7::{IResult, ErrorConvert};
+use nom7::IResult;
 use nom7::bytes::complete::{take, take_while_m_n};
 use nom7::bits::streaming::take as take_bit;
-use nom7::error::{make_error, ErrorKind, ParseError, Error};
+use nom7::error::{make_error, ErrorKind};
 use nom7::Err;
 use nom7::number::complete::{be_u8, be_u16, be_u24, be_u32, be_i8, be_i16, be_i24, be_i32};
 use nom7::sequence::tuple;
+
+use super::common;
 
 const BER_TYPE_BOOLEAN: u8 = 0x01;
 const BER_TYPE_INTEGER: u8 = 0x02;
@@ -124,18 +126,8 @@ pub fn parse_ber_integer(input: &[u8], length: u32) -> IResult<&[u8], i32> {
     Ok((rem, data))
 }
 
-pub fn my_bits<'a, O, E, P>(parser: P) -> impl FnMut(&'a [u8]) -> IResult<&'a [u8], O, E>
-    where
-        E: ParseError<&'a [u8]>,
-        Error<(&'a [u8], usize)>: ErrorConvert<E>,
-        P: FnMut((&'a [u8], usize)) -> IResult<(&'a [u8], usize), O, Error<(&'a [u8], usize)>>,
-{
-    // use full path to disambiguate nom `bits` from this current function name
-    nom7::bits::bits(parser)
-}
-
 pub fn parse_u8_bit(input: &[u8]) -> IResult<&[u8],(u8, u8, u8, u8, u8, u8, u8, u8)> {
-    my_bits(tuple((
+    common::my_bits(tuple((
         take_bit(1u8),
         take_bit(1u8),
         take_bit(1u8),

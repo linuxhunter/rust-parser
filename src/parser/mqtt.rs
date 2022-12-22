@@ -1,11 +1,11 @@
-use nom7::ErrorConvert;
-use nom7::error::{ParseError, Error};
 use nom7::number::complete::{be_u8, be_u16};
 use nom7::sequence::tuple;
 use nom7::{IResult, bytes::complete::take_while_m_n};
 use nom7::combinator::verify;
 use nom7::bits::streaming::take;
 use nom7::multi::length_data;
+
+use super::common;
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone, PartialEq, PartialOrd)]
@@ -126,19 +126,9 @@ pub fn parse_mqtt_variable_integer(input: &[u8]) -> IResult<&[u8], u32> {
     Ok((rem, convert_variant(continued_part.to_vec(), non_continued_part)))
 }
 
-pub fn my_bits<'a, O, E, P>(parser: P) -> impl FnMut(&'a [u8]) -> IResult<&'a [u8], O, E>
-    where
-        E: ParseError<&'a [u8]>,
-        Error<(&'a [u8], usize)>: ErrorConvert<E>,
-        P: FnMut((&'a [u8], usize)) -> IResult<(&'a [u8], usize), O, Error<(&'a [u8], usize)>>,
-{
-    // use full path to disambiguate nom `bits` from this current function name
-    nom7::bits::bits(parser)
-}
-
 #[inline]
 pub fn parse_fixed_header_flags(input: &[u8]) -> IResult<&[u8], (u8, u8, u8, u8)> {
-    my_bits(tuple((
+    common::my_bits(tuple((
         take(4u8),
         take(1u8),
         take(2u8),
@@ -147,7 +137,7 @@ pub fn parse_fixed_header_flags(input: &[u8]) -> IResult<&[u8], (u8, u8, u8, u8)
 }
 
 pub fn parse_connect_flags(input: &[u8]) -> IResult<&[u8], (u8, u8, u8, u8, u8, u8, u8)> {
-    my_bits(tuple((
+    common::my_bits(tuple((
         take(1u8),
         take(1u8),
         take(1u8),
