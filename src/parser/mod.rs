@@ -9,4 +9,5 @@ pub mod dhcp;
 pub mod mqtt;
 pub mod ntp;
 pub mod dcerpc;
+pub mod modbus;
 
