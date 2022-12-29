@@ -8,3 +8,5 @@ pub mod ftp;
 pub mod dhcp;
 pub mod mqtt;
 pub mod ntp;
+pub mod dcerpc;
+
