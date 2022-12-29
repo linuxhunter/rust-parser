@@ -48,6 +48,7 @@ pub struct DCERPCBind {
     assoc_group: u32,
     num_ctx_items: u32,
     ctx_items: Vec<DCERPCBindCtxItem>,
+    auth_info: Option<DCERPCAuthInfo>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -59,6 +60,7 @@ pub struct DCERPCBindAck {
     scndry_addr: Vec<u8>,
     num_results: u32,
     ctx_items: Vec<DCERPCBindAckCtxItem>,
+    auth_info: Option<DCERPCAuthInfo>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -170,18 +172,26 @@ pub fn parse_dcerpc_bind_ctx_items(input: &[u8], endianess: Endianness, num_ctx_
     Ok((rem, dcerpc_bind_ctx_items))
 }
 
-pub fn parse_dcerpc_bind(input: &[u8], endianess: Endianness) -> IResult<&[u8], DCERPCBind> {
+pub fn parse_dcerpc_bind(input: &[u8], endianess: Endianness, has_authinfo: bool) -> IResult<&[u8], DCERPCBind> {
     let (rem, max_xmit_frag) = u16(endianess)(input)?;
     let (rem, max_recv_frag) = u16(endianess)(rem)?;
     let (rem, assoc_group) = u32(endianess)(rem)?;
     let (rem, num_ctx_items) = u32(endianess)(rem)?;
     let (rem, ctx_items) = parse_dcerpc_bind_ctx_items(rem, endianess, num_ctx_items)?;
+    let (rem, auth_info) = if has_authinfo {
+        let (rem, auth_data) = parse_dcerpc_auth_info(rem, endianess)?;
+        let auth_info = Some(auth_data);
+        (rem, auth_info)
+    } else {
+        (rem, None)
+    };
     Ok((rem, DCERPCBind {
         max_xmit_frag,
         max_recv_frag,
         assoc_group,
         num_ctx_items,
         ctx_items,
+        auth_info,
     }))
 }
 
@@ -204,7 +214,7 @@ pub fn parse_dcerpc_bind_ack_ctx_items(input: &[u8], endianess: Endianness, num_
     Ok((rem, dcerpc_bind_ack_ctx_items))
 }
 
-pub fn parse_dcerpc_bind_ack(input: &[u8], endianess: Endianness) -> IResult<&[u8], DCERPCBindAck> {
+pub fn parse_dcerpc_bind_ack(input: &[u8], endianess: Endianness, has_authinfo: bool) -> IResult<&[u8], DCERPCBindAck> {
     let (rem, max_xmit_frag) = u16(endianess)(input)?;
     let (rem, max_recv_frag) = u16(endianess)(rem)?;
     let (rem, assoc_group) = u32(endianess)(rem)?;
@@ -213,6 +223,13 @@ pub fn parse_dcerpc_bind_ack(input: &[u8], endianess: Endianness) -> IResult<&[u
     let (rem, _) = take(2usize)(rem)?;
     let (rem, num_results) = u32(endianess)(rem)?;
     let (rem, ctx_items) = parse_dcerpc_bind_ack_ctx_items(rem, endianess, num_results)?;
+    let (rem, auth_info) = if has_authinfo == true {
+        let (rem, auth_data) = parse_dcerpc_auth_info(rem, endianess)?;
+        let auth_info = Some(auth_data);
+        (rem, auth_info)
+    } else {
+        (rem, None)
+    };
     Ok((rem, DCERPCBindAck {
         max_xmit_frag,
         max_recv_frag,
@@ -221,6 +238,7 @@ pub fn parse_dcerpc_bind_ack(input: &[u8], endianess: Endianness) -> IResult<&[u
         scndry_addr: scndry_addr.to_vec(),
         num_results,
         ctx_items,
+        auth_info,
     }))
 }
 
@@ -258,8 +276,7 @@ pub fn parse_dcerpc_response(input: &[u8], endianess: Endianness) -> IResult<&[u
 }
 
 pub fn parse_dcerpc_auth_info(input: &[u8], endianess: Endianness) -> IResult<&[u8], DCERPCAuthInfo> {
-    let (rem, _) = take(4usize)(input)?;
-    let (rem, auth_type) = be_u8(rem)?;
+    let (rem, auth_type) = be_u8(input)?;
     let (rem, auth_level) = be_u8(rem)?;
     let (rem, auth_pad_len) = be_u8(rem)?;
     let (rem, auth_reserved) = be_u8(rem)?;
@@ -328,7 +345,7 @@ use super::*;
                 auth_length: 0x0000,
                 call_id: 0x00000002,
             });
-            match parse_dcerpc_bind(rem, Endianness::Little) {
+            match parse_dcerpc_bind(rem, Endianness::Little, header.auth_length != 0) {
                 Ok((rem, data)) => {
                     assert_eq!(data, DCERPCBind {
                         max_xmit_frag: 0x16d0,
@@ -360,6 +377,7 @@ use super::*;
                                 version: 0x00000001,
                             }],
                         }],
+                        auth_info: None,
                     })
                 },
                 Err(_) => {
@@ -401,7 +419,7 @@ use super::*;
                 auth_length: 0x0000,
                 call_id: 0x00000002,
             });
-            match parse_dcerpc_bind_ack(rem, Endianness::Little) {
+            match parse_dcerpc_bind_ack(rem, Endianness::Little, header.auth_length != 0) {
                 Ok((rem, data)) => {
                     assert_eq!(data, DCERPCBindAck {
                         max_xmit_frag: 0x16d0,
@@ -424,6 +442,7 @@ use super::*;
                                 syntax_ver: 0x00000000,
                             }
                         ],
+                        auth_info: None,
                     });
                 },
                 Err(_) => {
@@ -538,7 +557,7 @@ use super::*;
                 auth_length: 0x01ba,
                 call_id: 0x00000003,
             });
-            match parse_dcerpc_auth_info(rem, Endianness::Little) {
+            match parse_dcerpc_auth_info(&rem[4..], Endianness::Little) {
                 Ok((rem, data)) => {
                     assert_eq!(data, DCERPCAuthInfo {
                         auth_type: 0x0a,
@@ -590,6 +609,151 @@ use super::*;
                         fault_flags: 0x00,
                         status: 0x00000005,
                         reserved: 0x00000000,
+                    });
+                },
+                Err(_) => {
+                    panic!("should not reach here")
+                }
+            }
+        },
+        Err(_) => {
+            panic!("should not reach here");
+        }
+    }
+   }
+
+   #[test]
+   fn test_parse_dcerpc_bind_with_auth_info() {
+    let pcap = include_bytes!("pcaps/dcerpc/dcerpc_bind_with_auth.pcap");
+    let payloads = &pcap[24+16+54..];
+    match parse_dcerpc_header(payloads) {
+        Ok((rem, header)) => {
+            assert_eq!(header, DCERPCHeader {
+                version: 0x05,
+                min_version: 0x00,
+                packet_type: 0x0b,
+                packet_flags: 0x03,
+                data_representation: vec![0x10, 0x00, 0x00, 0x00],
+                frag_length: 0x0078,
+                auth_length: 0x0028,
+                call_id: 0x00000003,
+            });
+            match parse_dcerpc_bind(rem, Endianness::Little, header.auth_length != 0) {
+                Ok((rem, data)) => {
+                    assert_eq!(data, DCERPCBind {
+                        max_xmit_frag: 0x16d0,
+                        max_recv_frag: 0x16d0,
+                        assoc_group: 0x000050af,
+                        num_ctx_items: 0x00000001,
+                        ctx_items: vec![
+                            DCERPCBindCtxItem {
+                                context_id: 0x0001,
+                                num_trans_items: 0x0001,
+                                abstract_syntax: vec![
+                                    DCERPCBindCtxItemAbstractSyntax {
+                                        interface_uuid: vec![0xa0, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46],
+                                        interface_ver: 0x0000,
+                                        interface_ver_minor: 0x0000,
+                                    }
+                                ],
+                                transfer_syntax: vec![
+                                    DCERPCBindCtxItemTransferSyntax {
+                                        transfer_syntax_uuid: vec![0x04, 0x5d, 0x88, 0x8a, 0xeb, 0x1c, 0xc9, 0x11, 0x9f, 0xe8, 0x08, 0x00, 0x2b, 0x10, 0x48, 0x60],
+                                        version: 0x00000002,
+                                    }
+                                ],
+                            }
+                        ],
+                        auth_info: Some(DCERPCAuthInfo {
+                            auth_type: 0x0a,
+                            auth_level: 0x02,
+                            auth_pad_len: 0x00,
+                            auth_reserved: 0x00,
+                            auth_context_id: 0x00000000,
+                            auth_data: vec![0x4e, 0x54,
+                            0x4c, 0x4d, 0x53, 0x53, 0x50, 0x00, 0x01, 0x00,
+                            0x00, 0x00, 0x97, 0x82, 0x08, 0xe2, 0x00, 0x00,
+                            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x06, 0x01,
+                            0xb1, 0x1d, 0x00, 0x00, 0x00, 0x0f
+                            ],
+                        }),
+                    });
+                },
+                Err(_) => {
+                    panic!("should not reach here")
+                }
+            }
+        },
+        Err(_) => {
+            panic!("should not reach here")
+        }
+    }
+   }
+
+    #[test]
+   fn test_parse_dcerpc_bind_ack_with_auth_info() {
+    let pcap = include_bytes!("pcaps/dcerpc/dcerpc_bind_ack_with_auth.pcap");
+    let payloads = &pcap[24+16+54..];
+    match parse_dcerpc_header(payloads) {
+        Ok((rem, header)) => {
+            assert_eq!(header, DCERPCHeader {
+                version: 0x05,
+                min_version: 0x00,
+                packet_type: 0x0c,
+                packet_flags: 0x03,
+                data_representation: vec![0x10, 0x00, 0x00, 0x00],
+                frag_length: 0x00ec,
+                auth_length: 0x00a8,
+                call_id: 0x00000003,
+            });
+            match parse_dcerpc_bind_ack(rem, Endianness::Little, header.auth_length != 0) {
+                Ok((rem, data)) => {
+                    assert_eq!(data, DCERPCBindAck {
+                        max_xmit_frag: 0x16d0,
+                        max_recv_frag: 0x16d0,
+                        assoc_group: 0x000050af,
+                        scndry_addr_len: 0x0004,
+                        scndry_addr: vec![0x31, 0x33, 0x35, 0x00],
+                        num_results: 0x00000001,
+                        ctx_items: vec![
+                            DCERPCBindAckCtxItem {
+                                ack_result: 0x0000,
+                                bind_time_features: 0x0000,
+                                transfer_syntax: vec![0x04, 0x5d, 0x88, 0x8a, 0xeb, 0x1c, 0xc9, 0x11, 0x9f, 0xe8, 0x08, 0x00, 0x2b, 0x10, 0x48, 0x60],
+                                syntax_ver: 0x00000002,
+                            },
+                        ],
+                        auth_info: Some(DCERPCAuthInfo {
+                            auth_type: 0x0a,
+                            auth_level: 0x02,
+                            auth_pad_len: 0x00,
+                            auth_reserved: 0x00,
+                            auth_context_id: 0x00000000,
+                            auth_data: vec![78, 84, 76, 77, 83, 83, 80, 0,
+                            2, 0, 0, 0, 16, 0, 16, 0,
+                            56, 0, 0, 0, 21, 130, 138,
+                            226, 193, 219, 16, 133, 151, 248, 9,
+                            100, 0, 0, 0, 0, 0, 0, 0,
+                            0, 96, 0, 96, 0, 72, 0, 0,
+                            0, 6, 1, 177, 29, 0, 0, 0,
+                            15, 76, 0, 73, 0, 78, 0, 85,
+                            0, 88, 0, 45, 0, 80, 0, 67,
+                            0, 2, 0, 16, 0, 76, 0, 73,
+                            0, 78, 0, 85, 0, 88, 0, 45,
+                            0, 80, 0, 67, 0, 1, 0, 16,
+                            0, 76, 0, 73, 0, 78, 0, 85,
+                            0, 88, 0, 45, 0, 80, 0, 67,
+                            0, 4, 0, 16, 0, 108, 0, 105,
+                            0, 110, 0, 117, 0, 120, 0, 45,
+                            0, 80, 0, 67, 0, 3, 0, 16,
+                            0, 108, 0, 105, 0, 110, 0, 117,
+                            0, 120, 0, 45, 0, 80, 0, 67,
+                            0, 7, 0, 8, 0, 64, 116, 9,
+                            172, 56, 113, 210, 1, 0, 0, 0,
+                            0],
+                        }),
+
                     });
                 },
                 Err(_) => {
