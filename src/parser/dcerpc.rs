@@ -1,4 +1,8 @@
-use nom7::{IResult, number::{complete::{be_u8, u16, u32}, Endianness}, bytes::complete::take, combinator::rest};
+use nom7::{IResult, number::{complete::{be_u8, u16, u32}, Endianness}, bytes::complete::{take, take_till}, combinator::rest};
+
+const NTLMSSP_NEGOTIATE: u32 = 0x01;
+const NTLMSSP_CHALLENGE: u32 = 0x02;
+const NTLMSSP_AUTH: u32 = 0x03;
 
 #[derive(Debug, PartialEq)]
 pub struct DCERPCHeader {
@@ -86,7 +90,83 @@ pub struct DCERPCAuthInfo {
     auth_pad_len: u8,
     auth_reserved: u8,
     auth_context_id: u32,
-    auth_data: Vec<u8>,
+    auth_data: NTLMSecureServiceProvider,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct AuthMetaInfo {
+    length: u16,
+    maxlen: u16,
+    offset: u32,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct AuthVersion {
+    major_version: u8,
+    minor_version: u8,
+    build_number: u16,
+    ntlm_current_revision: u8,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct AuthTargetInfoAttribute {
+    item_type: u16,
+    item_length: u16,
+    item_name: Vec<u8>,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct AuthTargetInfo {
+    attributes: Vec<AuthTargetInfoAttribute>,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct NTLMSSPNegotiate {
+    calling_workstation_domain: Vec<u8>,
+    calling_workstation_name: Vec<u8>,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct NTLMSSPChallenge {
+    target_name_meta_info: AuthMetaInfo,
+    target_info_meta_info: AuthMetaInfo,
+    target_name: Vec<u8>,
+    target_info: AuthTargetInfo,
+    server_challenge: Vec<u8>,
+    reserved: Vec<u8>,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct NTLMSSPAuth {
+    lan_manager_response_meta_info: AuthMetaInfo,
+    ntlm_response_meta_info: AuthMetaInfo,
+    domain_name_meta_info: AuthMetaInfo,
+    user_name_meta_info: AuthMetaInfo,
+    host_name_meta_info: AuthMetaInfo,
+    session_key_meta_info: AuthMetaInfo,
+    mic: Vec<u8>,
+    domain_name: Vec<u8>,
+    user_name: Vec<u8>,
+    host_name: Vec<u8>,
+    lan_manager_response: Vec<u8>,
+    ntlm_response: Vec<u8>,
+    session_key: Vec<u8>,
+}
+
+#[derive(Debug, PartialEq)]
+pub enum NTLMSSPMessage {
+    Negotiate(NTLMSSPNegotiate),
+    Challenge(NTLMSSPChallenge),
+    Auth(NTLMSSPAuth),
+}
+
+#[derive(Debug, PartialEq)]
+pub struct NTLMSecureServiceProvider {
+    ntlm_identifier: Vec<u8>,
+    ntlm_message_type: u32,
+    negotiate_flags: u32,
+    version: AuthVersion,
+    ntlm_message: NTLMSSPMessage,
 }
 
 #[derive(Debug, PartialEq)]
@@ -275,20 +355,158 @@ pub fn parse_dcerpc_response(input: &[u8], endianess: Endianness) -> IResult<&[u
     }))
 }
 
+pub fn parse_dcerpc_auth_version(input: &[u8], endianess: Endianness) -> IResult<&[u8], AuthVersion> {
+    let (rem, major_version) = be_u8(input)?;
+    let (rem, minor_version) = be_u8(rem)?;
+    let (rem, build_number) = u16(endianess)(rem)?;
+    let (rem, _) = take(3usize)(rem)?;
+    let (rem, ntlm_current_revision) = be_u8(rem)?;
+    Ok((rem, AuthVersion {
+        major_version,
+        minor_version,
+        build_number,
+        ntlm_current_revision,
+    }))
+}
+
+pub fn parse_dcerpc_auth_meta_info(input: &[u8], endianess: Endianness) -> IResult<&[u8], AuthMetaInfo> {
+    let (rem, length) = u16(endianess)(input)?;
+    let (rem, maxlen) = u16(endianess)(rem)?;
+    let (rem, offset) = u32(endianess)(rem)?;
+    Ok((rem, AuthMetaInfo {
+        length,
+        maxlen,
+        offset,
+    }))
+}
+
+pub fn parse_dcerpc_target_info(input: &[u8], endianess: Endianness, length: u16) -> IResult<&[u8], AuthTargetInfo> {
+    let mut attributes = Vec::new();
+    let mut tmp_length = length;
+    let mut rem = input;
+    loop {
+        if tmp_length == 0 {
+            break;
+        }
+        let (tmp_rem, item_type) = u16(endianess)(rem)?;
+        let (tmp_rem, item_length) = u16(endianess)(tmp_rem)?;
+        let (tmp_rem, item_name) = take(item_length as usize)(tmp_rem)?;
+        attributes.push(AuthTargetInfoAttribute {
+            item_type,
+            item_length,
+            item_name: item_name.to_vec(),
+        });
+        rem = tmp_rem;
+        tmp_length -= (2 + 2 + item_length);
+    }
+    Ok((rem, AuthTargetInfo {
+        attributes,
+    }))
+}
+
+pub fn parse_dcerpc_auth_secure_service_provider(input: &[u8], endianess: Endianness) -> IResult<&[u8], NTLMSecureServiceProvider> {
+    let (rem, ntlm_identifier) = take_till(|c| c == 0x00)(input)?;
+    let (rem, _) = be_u8(rem)?;
+    let (rem, ntlm_message_type) = u32(endianess)(rem)?;
+    match ntlm_message_type {
+        NTLMSSP_NEGOTIATE => {
+            let (rem, negotiate_flags) = u32(endianess)(rem)?;
+            let (rem, calling_workstation_domain) = take(8usize)(rem)?;
+            let (rem, calling_workstation_name) = take(8usize)(rem)?;
+            let (rem, version) = parse_dcerpc_auth_version(rem, endianess)?;
+            Ok((rem, NTLMSecureServiceProvider {
+                ntlm_identifier: ntlm_identifier.to_vec(),
+                ntlm_message_type,
+                negotiate_flags,
+                version,
+                ntlm_message: NTLMSSPMessage::Negotiate(NTLMSSPNegotiate {
+                    calling_workstation_domain: calling_workstation_domain.to_vec(),
+                    calling_workstation_name: calling_workstation_name.to_vec(),
+                }),
+            }))
+        },
+        NTLMSSP_CHALLENGE => {
+            let (rem, target_name_meta_info) = parse_dcerpc_auth_meta_info(rem, endianess)?;
+            let (rem, negotiate_flags) = u32(endianess)(rem)?;
+            let (rem, server_challenge) = take(8usize)(rem)?;
+            let (rem, reserved) = take(8usize)(rem)?;
+            let (rem, target_info_meta_info) = parse_dcerpc_auth_meta_info(rem, endianess)?;
+            let (rem, version) = parse_dcerpc_auth_version(rem, endianess)?;
+            let (rem, target_name) = take(target_name_meta_info.length as usize)(rem)?;
+            let (rem, target_info) = parse_dcerpc_target_info(rem, endianess, target_info_meta_info.length)?;
+            Ok((rem, NTLMSecureServiceProvider {
+                ntlm_identifier: ntlm_identifier.to_vec(),
+                ntlm_message_type,
+                negotiate_flags,
+                version,
+                ntlm_message: NTLMSSPMessage::Challenge(NTLMSSPChallenge {
+                    target_name_meta_info,
+                    target_info_meta_info,
+                    target_name: target_name.to_vec(),
+                    target_info,
+                    server_challenge: server_challenge.to_vec(),
+                    reserved: reserved.to_vec(),
+                }),
+            }))
+        },
+        NTLMSSP_AUTH => {
+            let (rem, lan_manager_response_meta_info) = parse_dcerpc_auth_meta_info(rem, endianess)?;
+            let (rem, ntlm_response_meta_info) = parse_dcerpc_auth_meta_info(rem, endianess)?;
+            let (rem, domain_name_meta_info) = parse_dcerpc_auth_meta_info(rem, endianess)?;
+            let (rem, user_name_meta_info) = parse_dcerpc_auth_meta_info(rem, endianess)?;
+            let (rem, host_name_meta_info) = parse_dcerpc_auth_meta_info(rem, endianess)?;
+            let (rem, session_key_meta_info) = parse_dcerpc_auth_meta_info(rem, endianess)?;
+            let (rem, negotiate_flags) = u32(endianess)(rem)?;
+            let (rem, version) = parse_dcerpc_auth_version(rem, endianess)?;
+            let (rem, mic) = take(16usize)(rem)?;
+            let (rem, domain_name) = take(domain_name_meta_info.length as usize)(rem)?;
+            let (rem, user_name) = take(user_name_meta_info.length as usize)(rem)?;
+            let (rem, host_name) = take(host_name_meta_info.length as usize)(rem)?;
+            let (rem, lan_manager_response) = take(lan_manager_response_meta_info.length as usize)(rem)?;
+            let (rem, ntlm_response) = take(ntlm_response_meta_info.length as usize)(rem)?;
+            let (rem, session_key) = take(session_key_meta_info.length as usize)(rem)?;
+            Ok((rem, NTLMSecureServiceProvider {
+                ntlm_identifier: ntlm_identifier.to_vec(),
+                ntlm_message_type,
+                negotiate_flags,
+                version,
+                ntlm_message: NTLMSSPMessage::Auth(NTLMSSPAuth {
+                    lan_manager_response_meta_info: lan_manager_response_meta_info,
+                    ntlm_response_meta_info: ntlm_response_meta_info,
+                    domain_name_meta_info: domain_name_meta_info,
+                    user_name_meta_info: user_name_meta_info,
+                    host_name_meta_info: host_name_meta_info,
+                    session_key_meta_info: session_key_meta_info,
+                    mic: mic.to_vec(),
+                    domain_name: domain_name.to_vec(),
+                    user_name: user_name.to_vec(),
+                    host_name: host_name.to_vec(),
+                    lan_manager_response: lan_manager_response.to_vec(),
+                    ntlm_response: ntlm_response.to_vec(),
+                    session_key: session_key.to_vec(),
+                }),
+            }))
+        },
+        _ => {
+            unimplemented!()
+        }
+    }
+}
+
 pub fn parse_dcerpc_auth_info(input: &[u8], endianess: Endianness) -> IResult<&[u8], DCERPCAuthInfo> {
     let (rem, auth_type) = be_u8(input)?;
     let (rem, auth_level) = be_u8(rem)?;
     let (rem, auth_pad_len) = be_u8(rem)?;
     let (rem, auth_reserved) = be_u8(rem)?;
     let (rem, auth_context_id) = u32(endianess)(rem)?;
-    let (rem, auth_data) = rest(rem)?;
+    let (rem, auth_data) = parse_dcerpc_auth_secure_service_provider(rem, endianess)?;
     Ok((rem, DCERPCAuthInfo {
         auth_type,
         auth_level,
         auth_pad_len,
         auth_reserved,
         auth_context_id,
-        auth_data: auth_data.to_vec(),
+        auth_data,
     }))
 }
 
@@ -536,16 +754,11 @@ use super::*;
     }
    }
 
-   const DCERPC_AUTH_INFO: &[u8] = &[
-                                        0x05, 0x00,
-    0x10, 0x03, 0x10, 0x00, 0x00, 0x00, 0xd6, 0x01,
-    0xba, 0x01, 0x03, 0x00, 0x00, 0x00, 0xd0, 0x16,
-    0xd0, 0x16, 0x0a, 0x02, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x4e, 0x54, 0x4c, 0x4d, 0x53, 0x53,
-   ];
    #[test]
    fn test_parse_dcerpc_auth_info() {
-    match parse_dcerpc_header(DCERPC_AUTH_INFO) {
+    let pcap = include_bytes!("pcaps/dcerpc/dcerpc_auth3.pcap");
+    let payloads = &pcap[24+16+54..];
+    match parse_dcerpc_header(payloads) {
         Ok((rem, header)) => {
             assert_eq!(header, DCERPCHeader {
                 version: 0x05,
@@ -565,7 +778,68 @@ use super::*;
                         auth_pad_len: 0x00,
                         auth_reserved: 0x00,
                         auth_context_id: 0x00000000,
-                        auth_data: vec![0x4e, 0x54, 0x4c, 0x4d, 0x53, 0x53],
+                        auth_data: NTLMSecureServiceProvider {
+                            ntlm_identifier: vec![0x4e, 0x54, 0x4c, 0x4d, 0x53, 0x53, 0x50],
+                            ntlm_message_type: 0x00000003,
+                            negotiate_flags: 0xe2888215,
+                            version: AuthVersion {
+                                major_version: 0x06,
+                                minor_version: 0x01,
+                                build_number: 0x1db1,
+                                ntlm_current_revision: 0x0f,
+                            },
+                            ntlm_message: NTLMSSPMessage::Auth(NTLMSSPAuth {
+                                lan_manager_response_meta_info: AuthMetaInfo {
+                                    length: 0x18,
+                                    maxlen: 0x18,
+                                    offset: 0x00000082,
+                                },
+                                ntlm_response_meta_info: AuthMetaInfo {
+                                    length: 0x0110,
+                                    maxlen: 0x0110,
+                                    offset: 0x0000009a,
+                                },
+                                domain_name_meta_info: AuthMetaInfo {
+                                    length: 0x0010,
+                                    maxlen: 0x0010,
+                                    offset: 0x00000058,
+                                },
+                                user_name_meta_info: AuthMetaInfo {
+                                    length: 0x000a,
+                                    maxlen: 0x000a,
+                                    offset: 0x00000068,
+                                },
+                                host_name_meta_info: AuthMetaInfo {
+                                    length: 0x0010,
+                                    maxlen: 0x0010,
+                                    offset: 0x00000072,
+                                },
+                                session_key_meta_info: AuthMetaInfo {
+                                    length: 0x0010,
+                                    maxlen: 0x0010,
+                                    offset: 0x000001aa,
+                                },
+                                mic: vec![0x79, 0x86, 0x88, 0x32, 0x43, 0x3e, 0x47, 0x3d, 0xf0, 0x3f, 0x35, 0x3d, 0xec, 0xe3, 0x89, 0xdd],
+                                domain_name: vec![0x6c, 0x00, 0x69, 0x00, 0x6e, 0x00, 0x75, 0x00, 0x78, 0x00, 0x2d, 0x00, 0x50, 0x00, 0x43, 0x00],
+                                user_name: vec![0x6c, 0x00, 0x69, 0x00, 0x6e, 0x00, 0x75, 0x00, 0x78, 0x00],
+                                host_name: vec![0x4c, 0x00, 0x49, 0x00, 0x4e, 0x00, 0x55, 0x00, 0x58, 0x00, 0x2d, 0x00, 0x50, 0x00, 0x43, 0x00],
+                                lan_manager_response: vec![
+                                    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                                    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                                    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                                ],
+                                ntlm_response: vec![231, 173, 29, 249, 127, 197, 200, 19, 92, 78, 15, 239, 164, 192, 145, 101, 1, 1, 0, 0, 0, 0, 0, 0,
+                                64, 116, 9, 172, 56, 113, 210, 1, 7, 165, 98, 219, 212, 250, 200, 154, 0, 0, 0, 0, 2, 0, 16, 0, 76, 0, 73, 0, 78, 0, 85,
+                                0, 88, 0, 45, 0, 80, 0, 67, 0, 1, 0, 16, 0, 76, 0, 73, 0, 78, 0, 85, 0, 88, 0, 45, 0, 80, 0, 67, 0, 4, 0, 16, 0, 108, 0,
+                                105, 0, 110, 0, 117, 0, 120, 0, 45, 0, 80, 0, 67, 0, 3, 0, 16, 0, 108, 0, 105, 0, 110, 0, 117, 0, 120, 0, 45, 0, 80, 0,
+                                67, 0, 7, 0, 8, 0, 64, 116, 9, 172, 56, 113, 210, 1, 6, 0, 4, 0, 2, 0, 0, 0, 8, 0, 48, 0, 48, 0, 0, 0, 0, 0, 0, 0, 1, 0,
+                                0, 0, 0, 32, 0, 0, 185, 73, 100, 209, 246, 252, 93, 47, 183, 250, 209, 0, 181, 119, 110, 214, 196, 190, 251, 197, 128, 197,
+                                163, 80, 20, 160, 21, 110, 43, 42, 128, 71, 10, 0, 16, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 9, 0, 40, 0, 82, 0,
+                                80, 0, 67, 0, 83, 0, 83, 0, 47, 0, 49, 0, 57, 0, 50, 0, 46, 0, 49, 0, 54, 0, 56, 0, 46, 0, 55, 0, 48, 0, 46, 0, 49, 0, 51, 0,
+                                48, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                                session_key: vec![0x26, 0xd2, 0x20, 0xad, 0x95, 0xdd, 0x77, 0x8f, 0x19, 0x22, 0x73, 0xf0, 0x07, 0x04, 0x7b, 0x87],
+                            }),
+                        },
                     });
                 },
                 Err(_) => {
@@ -670,13 +944,21 @@ use super::*;
                             auth_pad_len: 0x00,
                             auth_reserved: 0x00,
                             auth_context_id: 0x00000000,
-                            auth_data: vec![0x4e, 0x54,
-                            0x4c, 0x4d, 0x53, 0x53, 0x50, 0x00, 0x01, 0x00,
-                            0x00, 0x00, 0x97, 0x82, 0x08, 0xe2, 0x00, 0x00,
-                            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x06, 0x01,
-                            0xb1, 0x1d, 0x00, 0x00, 0x00, 0x0f
-                            ],
+                            auth_data: NTLMSecureServiceProvider {
+                                ntlm_identifier: vec![0x4e, 0x54, 0x4c, 0x4d, 0x53, 0x53, 0x50],
+                                ntlm_message_type: 0x00000001,
+                                negotiate_flags: 0xe2088297,
+                                version: AuthVersion {
+                                    major_version: 0x06,
+                                    minor_version: 0x01,
+                                    build_number: 0x1db1,
+                                    ntlm_current_revision: 0x0f,
+                                },
+                                ntlm_message: NTLMSSPMessage::Negotiate(NTLMSSPNegotiate {
+                                    calling_workstation_domain: vec![0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
+                                    calling_workstation_name: vec![0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
+                                }),
+                            },
                         }),
                     });
                 },
@@ -730,28 +1012,66 @@ use super::*;
                             auth_pad_len: 0x00,
                             auth_reserved: 0x00,
                             auth_context_id: 0x00000000,
-                            auth_data: vec![78, 84, 76, 77, 83, 83, 80, 0,
-                            2, 0, 0, 0, 16, 0, 16, 0,
-                            56, 0, 0, 0, 21, 130, 138,
-                            226, 193, 219, 16, 133, 151, 248, 9,
-                            100, 0, 0, 0, 0, 0, 0, 0,
-                            0, 96, 0, 96, 0, 72, 0, 0,
-                            0, 6, 1, 177, 29, 0, 0, 0,
-                            15, 76, 0, 73, 0, 78, 0, 85,
-                            0, 88, 0, 45, 0, 80, 0, 67,
-                            0, 2, 0, 16, 0, 76, 0, 73,
-                            0, 78, 0, 85, 0, 88, 0, 45,
-                            0, 80, 0, 67, 0, 1, 0, 16,
-                            0, 76, 0, 73, 0, 78, 0, 85,
-                            0, 88, 0, 45, 0, 80, 0, 67,
-                            0, 4, 0, 16, 0, 108, 0, 105,
-                            0, 110, 0, 117, 0, 120, 0, 45,
-                            0, 80, 0, 67, 0, 3, 0, 16,
-                            0, 108, 0, 105, 0, 110, 0, 117,
-                            0, 120, 0, 45, 0, 80, 0, 67,
-                            0, 7, 0, 8, 0, 64, 116, 9,
-                            172, 56, 113, 210, 1, 0, 0, 0,
-                            0],
+                            auth_data: NTLMSecureServiceProvider {
+                                ntlm_identifier: vec![0x4e, 0x54, 0x4c, 0x4d, 0x53, 0x53, 0x50],
+                                ntlm_message_type: 0x00000002,
+                                negotiate_flags: 0xe28a8215,
+                                version: AuthVersion {
+                                    major_version: 0x06,
+                                    minor_version: 0x01,
+                                    build_number: 0x1db1,
+                                    ntlm_current_revision: 0x0f,
+                                },
+                                ntlm_message: NTLMSSPMessage::Challenge(NTLMSSPChallenge {
+                                    target_name_meta_info: AuthMetaInfo {
+                                        length: 0x0010,
+                                        maxlen: 0x0010,
+                                        offset: 0x00000038,
+                                    },
+                                    target_info_meta_info: AuthMetaInfo {
+                                        length: 0x0060,
+                                        maxlen: 0x0060,
+                                        offset: 0x00000048,
+                                    },
+                                    target_name: vec![0x4c, 0x00, 0x49, 0x00, 0x4e, 0x00, 0x55, 0x00, 0x58, 0x00, 0x2d, 0x00, 0x50, 0x00, 0x43, 0x00],
+                                    target_info: AuthTargetInfo {
+                                        attributes: vec![
+                                            AuthTargetInfoAttribute {
+                                                item_type: 0x0002,
+                                                item_length: 0x0010,
+                                                item_name: vec![0x4c, 0x00, 0x49, 0x00, 0x4e, 0x00, 0x55, 0x00, 0x58, 0x00, 0x2d, 0x00, 0x50, 0x00, 0x43, 0x00],
+                                            },
+                                            AuthTargetInfoAttribute {
+                                                item_type: 0x0001,
+                                                item_length: 0x0010,
+                                                item_name: vec![0x4c, 0x00, 0x49, 0x00, 0x4e, 0x00, 0x55, 0x00, 0x58, 0x00, 0x2d, 0x00, 0x50, 0x00, 0x43, 0x00],
+                                            },
+                                            AuthTargetInfoAttribute {
+                                                item_type: 0x0004,
+                                                item_length: 0x0010,
+                                                item_name: vec![0x6c, 0x00, 0x69, 0x00, 0x6e, 0x00, 0x75, 0x00, 0x78, 0x00, 0x2d, 0x00, 0x50, 0x00, 0x43, 0x00],
+                                            },
+                                            AuthTargetInfoAttribute {
+                                                item_type: 0x0003,
+                                                item_length: 0x0010,
+                                                item_name: vec![0x6c, 0x00, 0x69, 0x00, 0x6e, 0x00, 0x75, 0x00, 0x78, 0x00, 0x2d, 0x00, 0x50, 0x00, 0x43, 0x00],
+                                            },
+                                            AuthTargetInfoAttribute {
+                                                item_type: 0x0007,
+                                                item_length: 0x0008,
+                                                item_name: vec![0x40, 0x74, 0x09, 0xac, 0x38, 0x71, 0xd2, 0x01],
+                                            },
+                                            AuthTargetInfoAttribute {
+                                                item_type: 0x0000,
+                                                item_length: 0x0000,
+                                                item_name: vec![],
+                                            },
+                                        ],
+                                    },
+                                    server_challenge: vec![0xc1, 0xdb, 0x10, 0x85, 0x97, 0xf8, 0x09, 0x64],
+                                    reserved: vec![0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
+                                }),
+                            },
                         }),
 
                     });
