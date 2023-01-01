@@ -109,7 +109,7 @@ pub struct AuthVersion {
 }
 
 #[derive(Debug, PartialEq)]
-pub struct AuthTargetInfoAttribute {
+pub struct AuthAttribute {
     item_type: u16,
     item_length: u16,
     item_name: Vec<u8>,
@@ -117,7 +117,7 @@ pub struct AuthTargetInfoAttribute {
 
 #[derive(Debug, PartialEq)]
 pub struct AuthTargetInfo {
-    attributes: Vec<AuthTargetInfoAttribute>,
+    attributes: Vec<AuthAttribute>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -137,6 +137,16 @@ pub struct NTLMSSPChallenge {
 }
 
 #[derive(Debug, PartialEq)]
+pub struct NTLMAuthResponse {
+    nt_proof_str: Vec<u8>,
+    response_version: u8,
+    hi_response_version: u8,
+    time: Vec<u8>,
+    ntlm2_client_challenge: Vec<u8>,
+    attributes: Vec<AuthAttribute>,
+}
+
+#[derive(Debug, PartialEq)]
 pub struct NTLMSSPAuth {
     lan_manager_response_meta_info: AuthMetaInfo,
     ntlm_response_meta_info: AuthMetaInfo,
@@ -149,7 +159,7 @@ pub struct NTLMSSPAuth {
     user_name: Vec<u8>,
     host_name: Vec<u8>,
     lan_manager_response: Vec<u8>,
-    ntlm_response: Vec<u8>,
+    ntlm_response: NTLMAuthResponse,
     session_key: Vec<u8>,
 }
 
@@ -391,7 +401,7 @@ pub fn parse_dcerpc_target_info(input: &[u8], endianess: Endianness, length: u16
         let (tmp_rem, item_type) = u16(endianess)(rem)?;
         let (tmp_rem, item_length) = u16(endianess)(tmp_rem)?;
         let (tmp_rem, item_name) = take(item_length as usize)(tmp_rem)?;
-        attributes.push(AuthTargetInfoAttribute {
+        attributes.push(AuthAttribute {
             item_type,
             item_length,
             item_name: item_name.to_vec(),
@@ -402,6 +412,48 @@ pub fn parse_dcerpc_target_info(input: &[u8], endianess: Endianness, length: u16
     Ok((rem, AuthTargetInfo {
         attributes,
     }))
+}
+
+pub fn parse_dcerpc_auth_ntlm_response(input: &[u8], endianess: Endianness, length: u16) -> IResult<&[u8], NTLMAuthResponse> {
+    let (rem, nt_proof_str) = take(16usize)(input)?;
+    let (rem, response_version) = be_u8(rem)?;
+    let (rem, hi_response_version) = be_u8(rem)?;
+    let (rem, _) = take(6usize)(rem)?;
+    let (rem, time) = take(8usize)(rem)?;
+    let (rem, ntlm2_client_chanllenge) = take(8usize)(rem)?;
+    let (rem, _) = take(4usize)(rem)?;
+    let mut attributes = Vec::new();
+    let mut tmp_length = length - (16 + 1 + 1 + 6 + 8 + 8 + 4);
+    let mut tmp_rem = rem;
+    loop {
+        if tmp_length == 0 {
+            break;
+        }
+        let (tmp_rem1, item_type) = u16(endianess)(tmp_rem)?;
+        let (tmp_rem1, item_length) = u16(endianess)(tmp_rem1)?;
+        let (tmp_rem1, item_name) = take(item_length as usize)(tmp_rem1)?;
+        attributes.push(AuthAttribute {
+            item_type,
+            item_length,
+            item_name: item_name.to_vec(),
+        });
+        tmp_rem = tmp_rem1;
+        tmp_length -= (2 + 2 + item_length);
+        if item_type == 0x0000 {
+            let (tmp_rem1, _) = take(tmp_length as usize)(tmp_rem)?;
+            tmp_rem = tmp_rem1;
+            tmp_length = 0;
+        }
+    }
+    Ok((tmp_rem, NTLMAuthResponse {
+        nt_proof_str: nt_proof_str.to_vec(),
+        response_version,
+        hi_response_version,
+        time: time.to_vec(),
+        ntlm2_client_challenge: ntlm2_client_chanllenge.to_vec(),
+        attributes,
+    }))
+
 }
 
 pub fn parse_dcerpc_auth_secure_service_provider(input: &[u8], endianess: Endianness) -> IResult<&[u8], NTLMSecureServiceProvider> {
@@ -463,7 +515,7 @@ pub fn parse_dcerpc_auth_secure_service_provider(input: &[u8], endianess: Endian
             let (rem, user_name) = take(user_name_meta_info.length as usize)(rem)?;
             let (rem, host_name) = take(host_name_meta_info.length as usize)(rem)?;
             let (rem, lan_manager_response) = take(lan_manager_response_meta_info.length as usize)(rem)?;
-            let (rem, ntlm_response) = take(ntlm_response_meta_info.length as usize)(rem)?;
+            let (rem, ntlm_response) = parse_dcerpc_auth_ntlm_response(rem, endianess, ntlm_response_meta_info.length)?;
             let (rem, session_key) = take(session_key_meta_info.length as usize)(rem)?;
             Ok((rem, NTLMSecureServiceProvider {
                 ntlm_identifier: ntlm_identifier.to_vec(),
@@ -482,7 +534,7 @@ pub fn parse_dcerpc_auth_secure_service_provider(input: &[u8], endianess: Endian
                     user_name: user_name.to_vec(),
                     host_name: host_name.to_vec(),
                     lan_manager_response: lan_manager_response.to_vec(),
-                    ntlm_response: ntlm_response.to_vec(),
+                    ntlm_response: ntlm_response,
                     session_key: session_key.to_vec(),
                 }),
             }))
@@ -828,15 +880,81 @@ use super::*;
                                     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
                                     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
                                 ],
-                                ntlm_response: vec![231, 173, 29, 249, 127, 197, 200, 19, 92, 78, 15, 239, 164, 192, 145, 101, 1, 1, 0, 0, 0, 0, 0, 0,
-                                64, 116, 9, 172, 56, 113, 210, 1, 7, 165, 98, 219, 212, 250, 200, 154, 0, 0, 0, 0, 2, 0, 16, 0, 76, 0, 73, 0, 78, 0, 85,
-                                0, 88, 0, 45, 0, 80, 0, 67, 0, 1, 0, 16, 0, 76, 0, 73, 0, 78, 0, 85, 0, 88, 0, 45, 0, 80, 0, 67, 0, 4, 0, 16, 0, 108, 0,
-                                105, 0, 110, 0, 117, 0, 120, 0, 45, 0, 80, 0, 67, 0, 3, 0, 16, 0, 108, 0, 105, 0, 110, 0, 117, 0, 120, 0, 45, 0, 80, 0,
-                                67, 0, 7, 0, 8, 0, 64, 116, 9, 172, 56, 113, 210, 1, 6, 0, 4, 0, 2, 0, 0, 0, 8, 0, 48, 0, 48, 0, 0, 0, 0, 0, 0, 0, 1, 0,
-                                0, 0, 0, 32, 0, 0, 185, 73, 100, 209, 246, 252, 93, 47, 183, 250, 209, 0, 181, 119, 110, 214, 196, 190, 251, 197, 128, 197,
-                                163, 80, 20, 160, 21, 110, 43, 42, 128, 71, 10, 0, 16, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 9, 0, 40, 0, 82, 0,
-                                80, 0, 67, 0, 83, 0, 83, 0, 47, 0, 49, 0, 57, 0, 50, 0, 46, 0, 49, 0, 54, 0, 56, 0, 46, 0, 55, 0, 48, 0, 46, 0, 49, 0, 51, 0,
-                                48, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                                ntlm_response: NTLMAuthResponse {
+                                    nt_proof_str: vec![0xe7, 0xad, 0x1d, 0xf9, 0x7f, 0xc5, 0xc8, 0x13, 0x5c, 0x4e, 0x0f, 0xef, 0xa4, 0xc0, 0x91, 0x65],
+                                    response_version: 0x01,
+                                    hi_response_version: 0x01,
+                                    time: vec![0x40, 0x74, 0x09, 0xac, 0x38, 0x71, 0xd2, 0x01],
+                                    ntlm2_client_challenge: vec![0x07, 0xa5, 0x62, 0xdb, 0xd4, 0xfa, 0xc8, 0x9a],
+                                    attributes: vec![
+                                        AuthAttribute {
+                                            item_type: 0x0002,
+                                            item_length: 0x0010,
+                                            item_name: vec![0x4c, 0x00, 0x49, 0x00, 0x4e, 0x00, 0x55, 0x00, 0x58, 0x00, 0x2d, 0x00, 0x50, 0x00, 0x43, 0x00],
+                                        },
+                                        AuthAttribute {
+                                            item_type: 0x0001,
+                                            item_length: 0x0010,
+                                            item_name: vec![0x4c, 0x00, 0x49, 0x00, 0x4e, 0x00, 0x55, 0x00, 0x58, 0x00, 0x2d, 0x00, 0x50, 0x00, 0x43, 0x00],
+                                        },
+                                        AuthAttribute {
+                                            item_type: 0x0004,
+                                            item_length: 0x0010,
+                                            item_name: vec![0x6c, 0x00, 0x69, 0x00, 0x6e, 0x00, 0x75, 0x00, 0x78, 0x00, 0x2d, 0x00, 0x50, 0x00, 0x43, 0x00],
+                                        },
+                                        AuthAttribute {
+                                            item_type: 0x0003,
+                                            item_length: 0x0010,
+                                            item_name: vec![0x6c, 0x00, 0x69, 0x00, 0x6e, 0x00, 0x75, 0x00, 0x78, 0x00, 0x2d, 0x00, 0x50, 0x00, 0x43, 0x00],
+                                        },
+                                        AuthAttribute {
+                                            item_type: 0x0007,
+                                            item_length: 0x0008,
+                                            item_name: vec![0x40, 0x74, 0x09, 0xac, 0x38, 0x71, 0xd2, 0x01],
+                                        },
+                                        AuthAttribute {
+                                            item_type: 0x0006,
+                                            item_length: 0x0004,
+                                            item_name: vec![0x02, 0x00, 0x00, 0x00],
+                                        },
+                                        AuthAttribute {
+                                            item_type: 0x0008,
+                                            item_length: 0x0030,
+                                            item_name: vec![
+                                                0x30, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                                                0x01, 0x00, 0x00, 0x00, 0x00, 0x20, 0x00, 0x00,
+                                                0xb9, 0x49, 0x64, 0xd1, 0xf6, 0xfc, 0x5d, 0x2f,
+                                                0xb7, 0xfa, 0xd1, 0x00, 0xb5, 0x77, 0x6e, 0xd6,
+                                                0xc4, 0xbe, 0xfb, 0xc5, 0x80, 0xc5, 0xa3, 0x50,
+                                                0x14, 0xa0, 0x15, 0x6e, 0x2b, 0x2a, 0x80, 0x47
+                                            ],
+                                        },
+                                        AuthAttribute {
+                                            item_type: 0x000a,
+                                            item_length: 0x0010,
+                                            item_name: vec![
+                                                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                                                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+                                            ],
+                                        },
+                                        AuthAttribute {
+                                            item_type: 0x0009,
+                                            item_length: 0x0028,
+                                            item_name: vec![
+                                                0x52, 0x00, 0x50, 0x00, 0x43, 0x00, 0x53, 0x00,
+                                                0x53, 0x00, 0x2f, 0x00, 0x31, 0x00, 0x39, 0x00,
+                                                0x32, 0x00, 0x2e, 0x00, 0x31, 0x00, 0x36, 0x00,
+                                                0x38, 0x00, 0x2e, 0x00, 0x37, 0x00, 0x30, 0x00,
+                                                0x2e, 0x00, 0x31, 0x00, 0x33, 0x00, 0x30, 0x00,
+                                            ],
+                                        },
+                                        AuthAttribute {
+                                            item_type: 0x0000,
+                                            item_length: 0x0000,
+                                            item_name: vec![],
+                                        }
+                                    ],
+                                },
                                 session_key: vec![0x26, 0xd2, 0x20, 0xad, 0x95, 0xdd, 0x77, 0x8f, 0x19, 0x22, 0x73, 0xf0, 0x07, 0x04, 0x7b, 0x87],
                             }),
                         },
@@ -1036,32 +1154,32 @@ use super::*;
                                     target_name: vec![0x4c, 0x00, 0x49, 0x00, 0x4e, 0x00, 0x55, 0x00, 0x58, 0x00, 0x2d, 0x00, 0x50, 0x00, 0x43, 0x00],
                                     target_info: AuthTargetInfo {
                                         attributes: vec![
-                                            AuthTargetInfoAttribute {
+                                            AuthAttribute {
                                                 item_type: 0x0002,
                                                 item_length: 0x0010,
                                                 item_name: vec![0x4c, 0x00, 0x49, 0x00, 0x4e, 0x00, 0x55, 0x00, 0x58, 0x00, 0x2d, 0x00, 0x50, 0x00, 0x43, 0x00],
                                             },
-                                            AuthTargetInfoAttribute {
+                                            AuthAttribute {
                                                 item_type: 0x0001,
                                                 item_length: 0x0010,
                                                 item_name: vec![0x4c, 0x00, 0x49, 0x00, 0x4e, 0x00, 0x55, 0x00, 0x58, 0x00, 0x2d, 0x00, 0x50, 0x00, 0x43, 0x00],
                                             },
-                                            AuthTargetInfoAttribute {
+                                            AuthAttribute {
                                                 item_type: 0x0004,
                                                 item_length: 0x0010,
                                                 item_name: vec![0x6c, 0x00, 0x69, 0x00, 0x6e, 0x00, 0x75, 0x00, 0x78, 0x00, 0x2d, 0x00, 0x50, 0x00, 0x43, 0x00],
                                             },
-                                            AuthTargetInfoAttribute {
+                                            AuthAttribute {
                                                 item_type: 0x0003,
                                                 item_length: 0x0010,
                                                 item_name: vec![0x6c, 0x00, 0x69, 0x00, 0x6e, 0x00, 0x75, 0x00, 0x78, 0x00, 0x2d, 0x00, 0x50, 0x00, 0x43, 0x00],
                                             },
-                                            AuthTargetInfoAttribute {
+                                            AuthAttribute {
                                                 item_type: 0x0007,
                                                 item_length: 0x0008,
                                                 item_name: vec![0x40, 0x74, 0x09, 0xac, 0x38, 0x71, 0xd2, 0x01],
                                             },
-                                            AuthTargetInfoAttribute {
+                                            AuthAttribute {
                                                 item_type: 0x0000,
                                                 item_length: 0x0000,
                                                 item_name: vec![],
