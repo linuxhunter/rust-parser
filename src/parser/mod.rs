@@ -13,3 +13,4 @@ pub mod modbus;
 pub mod sshv2;
 pub mod ikev2;
 pub mod ethernet_ip;
+pub mod opc_ua;
