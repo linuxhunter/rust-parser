@@ -250,9 +250,27 @@ pub struct OPCUAActivateSessionRequest {
 }
 
 #[derive(Debug, PartialEq)]
+pub struct OPCUAStatusCode {
+    array_size: u32,
+    status_codes: Vec<i32>,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct OPCUADignostic {
+
+}
+
+#[derive(Debug, PartialEq)]
+pub struct OPCUADiagnosticInfo {
+    array_size: u32,
+    diagnostic_info: Vec<OPCUADignostic>,
+}
+#[derive(Debug, PartialEq)]
 pub struct OPCUAActivateSessionResponse {
     response_header: OPCUAMessageResponseHeader,
-    /* FIXME */
+    server_nonce: Vec<u8>,
+    result: OPCUAStatusCode,
+    diagnostic_infos: OPCUADiagnosticInfo,
 }
 
 #[derive(Debug, PartialEq)]
@@ -916,16 +934,41 @@ pub fn parse_opcua_msg_activate_session_request(input: &[u8]) -> IResult<&[u8], 
     }))
 }
 
+pub fn parse_opcua_message_status_code(input: &[u8]) -> IResult<&[u8], OPCUAStatusCode> {
+    let (rem, array_size) = le_u32(input)?;
+    let status_codes = vec![];
+    Ok((rem, OPCUAStatusCode {
+        array_size,
+        status_codes,
+    }))
+}
+
+pub fn parse_opcua_message_diagnostic_infos(input: &[u8]) -> IResult<&[u8], OPCUADiagnosticInfo> {
+    let (rem, array_size) = le_u32(input)?;
+    let diagnostic_info = vec![];
+    Ok((rem, OPCUADiagnosticInfo {
+        array_size,
+        diagnostic_info,
+    }))
+}
+
 pub fn parse_opcua_msg_activate_session_response(input: &[u8]) -> IResult<&[u8], OPCUAActivateSessionResponse> {
     let (rem, (
         response_header,
-        _,
+        server_nonce,
+        result,
+        diagnostic_infos,
     )) = tuple((
         parse_opcua_message_response_header,
-        rest,
+        length_data(le_u32),
+        parse_opcua_message_status_code,
+        parse_opcua_message_diagnostic_infos,
     ))(input)?;
     Ok((rem, OPCUAActivateSessionResponse {
         response_header,
+        server_nonce: server_nonce.to_vec(),
+        result,
+        diagnostic_infos,
     }))
 }
 
@@ -1615,6 +1658,60 @@ mod tests {
                             user_token_signature: OPCUASignatureData {
                                 algorithm: String::new(),
                                 signature: String::new(),
+                            },
+                        }),
+                    }),
+                });
+            },
+            Err(_) => {
+                panic!("should not reach here");
+            }
+        }
+    }
+
+    #[test]
+    fn test_parse_opcua_activate_session_response() {
+        let pcap = include_bytes!("pcaps/opcua/opcua_message_activate_session_response.pcap");
+        let payload = &pcap[24+16+66..];
+        match parse_opcua(payload) {
+            Ok((rem, opc_ua)) => {
+                assert_eq!(rem.len(), 0);
+                assert_eq!(opc_ua, OPCUA {
+                    header: OPCUAHeader::MESSAGE(OPCUAMessageHeader {
+                        message_type: String::from("MSG"),
+                        chunk_type: b'F',
+                        message_size: 96,
+                        security_channel_id: 6495,
+                        security_token_id: 1,
+                        security_sequence_number: 54,
+                        security_request_id: 4,
+                    }),
+                    contents: OPCUAContents::MESSAGE(OPCUAMessage {
+                        type_id: OPCUAMessageTypeId {
+                            encoding_mask: 0x01,
+                            namespace_index: 0,
+                            identifier_numeric: 470,
+                        },
+                        message: OPCUASpecificMessage::ACTIVATE_SESSION_RESPONSE(OPCUAActivateSessionResponse {
+                            response_header: OPCUAMessageResponseHeader {
+                                timestamp: vec![0x19, 0x82, 0xce, 0x57, 0x5c, 0x2b, 0xca, 0x01],
+                                request_handle: 1,
+                                service_result: 0x00000000,
+                                service_diagnostics: 0x00,
+                                string_table: vec![0x00, 0x00, 0x00, 0x00],
+                                additional_header: OPCUAMessageAdditionalHeader {
+                                    type_id: 0x0000,
+                                    encoding_mask: 0x00,
+                                },
+                            },
+                            server_nonce: vec![243, 123, 189, 6, 77, 35, 236, 136, 59, 94, 105, 131, 36, 15, 17, 13, 134, 107, 70, 202, 72, 65, 202, 222, 143, 118, 81, 205, 37, 98, 63, 134],
+                            result: OPCUAStatusCode {
+                                array_size: 0,
+                                status_codes: vec![],
+                            },
+                            diagnostic_infos: OPCUADiagnosticInfo {
+                                array_size: 0,
+                                diagnostic_info: vec![],
                             },
                         }),
                     }),
