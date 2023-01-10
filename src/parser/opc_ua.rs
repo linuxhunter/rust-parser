@@ -64,7 +64,7 @@ pub struct OPCUAMessageRequestHeader {
     timestamp: Vec<u8>,
     request_handle: u32,
     return_diagnostic: u32,
-    audit_entry_id: Vec<u8>,
+    audit_entry_id: String,
     timeout_hint: u32,
     addition_header: OPCUAMessageAdditionalHeader,
 }
@@ -138,11 +138,11 @@ pub struct OPCUADiscoveryUrls {
 #[derive(Debug, PartialEq)]
 pub struct OPCUAApplicationDescription {
     application_uri: String,
-    product_uri: Vec<u8>,
+    product_uri: String,
     application_name: OPCUALocalizedText,
     application_type: u32,
-    gateway_server_uri: Vec<u8>,
-    discovery_profile_uri: Vec<u8>,
+    gateway_server_uri: String,
+    discovery_profile_uri: String,
     discovery_urls: OPCUADiscoveryUrls,
 }
 
@@ -150,9 +150,9 @@ pub struct OPCUAApplicationDescription {
 pub struct OPCUAUserTokenPolicy {
     policy_id: u8,
     user_token_type: u32,
-    issued_token_type: Vec<u8>,
-    issuer_endpoint_url: Vec<u8>,
-    security_policy_uri: Vec<u8>,
+    issued_token_type: String,
+    issuer_endpoint_url: String,
+    security_policy_uri: String,
 }
 
 #[derive(Debug, PartialEq)]
@@ -188,7 +188,14 @@ pub struct OPCUAGetEndpointResponse {
 #[derive(Debug, PartialEq)]
 pub struct OPCUACreateSessionRequest {
     request_header: OPCUAMessageRequestHeader,
-    /* FIXME */
+    client_description: OPCUAApplicationDescription,
+    server_uri: String,
+    endpoint_url: String,
+    session_name: String,
+    client_nonce: Vec<u8>,
+    client_certificate: Vec<u8>,
+    requested_session_timeout: Vec<u8>,
+    max_response_message_size: u32,
 }
 
 #[derive(Debug, PartialEq)]
@@ -427,7 +434,7 @@ pub fn parse_opcua_message_request_header(input: &[u8]) -> IResult<&[u8], OPCUAM
         take(8usize),
         le_u32,
         le_u32,
-        take(4usize),
+        parse_opcua_null_string,
         le_u32,
         parse_opcua_message_additional_header,
     ))(input)?;
@@ -436,7 +443,7 @@ pub fn parse_opcua_message_request_header(input: &[u8]) -> IResult<&[u8], OPCUAM
         timestamp: timestamp.to_vec(),
         request_handle,
         return_diagnostic,
-        audit_entry_id: audit_entry_id.to_vec(),
+        audit_entry_id,
         timeout_hint,
         addition_header,
     }))
@@ -563,7 +570,7 @@ pub fn parse_opcua_msg_get_endpoint_request(input: &[u8]) -> IResult<&[u8], OPCU
     }))
 }
 
-pub fn parse_opcua_msg_endpoint_server_application_name(input: &[u8]) -> IResult<&[u8], OPCUALocalizedText> {
+pub fn parse_opcua_message_application_description_application_name(input: &[u8]) -> IResult<&[u8], OPCUALocalizedText> {
     let (rem, (
         encoding_mask,
         text,
@@ -577,21 +584,34 @@ pub fn parse_opcua_msg_endpoint_server_application_name(input: &[u8]) -> IResult
     }))
 }
 
-pub fn parse_opcua_msg_endpoint_server_discovery_url(input: &[u8]) -> IResult<&[u8], String> {
+pub fn parse_opcua_message_application_description_discovery_url(input: &[u8]) -> IResult<&[u8], String> {
     let (rem, discovery_url) = length_data(le_u32)(input)?;
     Ok((rem, String::from_utf8(discovery_url.to_vec()).unwrap()))
 }
 
-pub fn parse_opcua_msg_endpoint_server_discovery_urls(input: &[u8]) -> IResult<&[u8], OPCUADiscoveryUrls> {
+pub fn parse_opcua_message_application_description_discovery_urls(input: &[u8]) -> IResult<&[u8], OPCUADiscoveryUrls> {
     let (rem, array_size) = le_u32(input)?;
-    let (rem, discovery_urls) = count(parse_opcua_msg_endpoint_server_discovery_url, array_size as usize)(rem)?;
+    let (rem, discovery_urls) = if array_size == 0 {
+        (rem, Vec::new())
+    } else {
+        count(parse_opcua_message_application_description_discovery_url, array_size as usize)(rem)?
+    };
     Ok((rem, OPCUADiscoveryUrls {
         array_size,
         discovery_urls,
     }))
 }
 
-pub fn parse_opcua_msg_endpoint_server(input: &[u8]) -> IResult<&[u8], OPCUAApplicationDescription> {
+pub fn parse_opcua_null_string(input: &[u8]) -> IResult<&[u8], String> {
+    if input[0] == 0xff && input[1] == 0xff && input[2] == 0xff && input[3] == 0xff {
+        Ok((&input[4..], String::new()))
+    } else {
+        let (rem, data) = length_data(le_u32)(input)?;
+        Ok((rem, String::from_utf8(data.to_vec()).unwrap()))
+    }
+}
+
+pub fn parse_opcua_message_application_description(input: &[u8]) -> IResult<&[u8], OPCUAApplicationDescription> {
     let (rem, (
         application_uri,
         product_uri,
@@ -602,20 +622,20 @@ pub fn parse_opcua_msg_endpoint_server(input: &[u8]) -> IResult<&[u8], OPCUAAppl
         discovery_urls,
     )) = tuple((
         length_data(le_u32),
-        take(4usize),
-        parse_opcua_msg_endpoint_server_application_name,
+        parse_opcua_null_string,
+        parse_opcua_message_application_description_application_name,
         le_u32,
-        take(4usize),
-        take(4usize),
-        parse_opcua_msg_endpoint_server_discovery_urls,
+        parse_opcua_null_string,
+        parse_opcua_null_string,
+        parse_opcua_message_application_description_discovery_urls,
     ))(input)?;
     Ok((rem, OPCUAApplicationDescription {
         application_uri: String::from_utf8(application_uri.to_vec()).unwrap(),
-        product_uri: product_uri.to_vec(),
+        product_uri,
         application_name,
         application_type,
-        gateway_server_uri: gateway_server_uri.to_vec(),
-        discovery_profile_uri: discovery_profile_uri.to_vec(),
+        gateway_server_uri,
+        discovery_profile_uri,
         discovery_urls,
     }))
 }
@@ -627,26 +647,21 @@ pub fn parse_opcua_msg_endpoint_user_token_policy(input: &[u8]) -> IResult<&[u8]
         user_token_type,
         issued_token_type,
         issuer_endpoint_url,
-        //security_policy_uri,
+        security_policy_uri,
     )) = tuple((
         le_u32,
         le_u8,
         le_u32,
-        take(4usize),
-        take(4usize),
-        //take(4usize),
+        parse_opcua_null_string,
+        parse_opcua_null_string,
+        parse_opcua_null_string,
     ))(input)?;
-    let (rem, security_policy_uri) = if rem[0] == 0xff && rem[1] == 0xff && rem[2] == 0xff && rem[3] == 0xff {
-        take(4usize)(rem)?
-    } else {
-        length_data(le_u32)(rem)?
-    };
     Ok((rem, OPCUAUserTokenPolicy {
         policy_id,
         user_token_type,
-        issued_token_type: issued_token_type.to_vec(),
-        issuer_endpoint_url: issuer_endpoint_url.to_vec(),
-        security_policy_uri: security_policy_uri.to_vec(),
+        issued_token_type,
+        issuer_endpoint_url,
+        security_policy_uri,
     }))
 }
 
@@ -671,7 +686,7 @@ pub fn parse_opcua_msg_endpoint(input: &[u8]) -> IResult<&[u8], OPCUAEndpointDes
         security_level,
     )) = tuple((
         length_data(le_u32),
-        parse_opcua_msg_endpoint_server,
+        parse_opcua_message_application_description,
         length_data(le_u32),
         le_u32,
         length_data(le_u32),
@@ -717,13 +732,35 @@ pub fn parse_opcua_msg_get_endpoint_response(input: &[u8]) -> IResult<&[u8], OPC
 pub fn parse_opcua_msg_create_session_request(input: &[u8]) -> IResult<&[u8], OPCUACreateSessionRequest> {
     let (rem, (
         request_header,
-        _,
+        client_description,
+        server_uri,
+        endpoint_url,
+        session_name,
+        client_nonce,
+        client_certificate,
+        requested_session_timeout,
+        max_response_message_size,
     )) = tuple((
         parse_opcua_message_request_header,
-        rest,
+        parse_opcua_message_application_description,
+        length_data(le_u32),
+        length_data(le_u32),
+        length_data(le_u32),
+        length_data(le_u32),
+        length_data(le_u32),
+        take(8usize),
+        le_u32,
     ))(input)?;
     Ok((rem, OPCUACreateSessionRequest {
         request_header,
+        client_description,
+        server_uri: String::from_utf8(server_uri.to_vec()).unwrap(),
+        endpoint_url: String::from_utf8(endpoint_url.to_vec()).unwrap(),
+        session_name: String::from_utf8(session_name.to_vec()).unwrap(),
+        client_nonce: client_nonce.to_vec(),
+        client_certificate: client_certificate.to_vec(),
+        requested_session_timeout: requested_session_timeout.to_vec(),
+        max_response_message_size,
     }))
 }
 
@@ -950,7 +987,7 @@ mod tests {
                                     timestamp: vec![0x00, 0x3c, 0x7d, 0x0c, 0x5c, 0x2b, 0xca, 0x01],
                                     request_handle: 1,
                                     return_diagnostic: 0x000003ff,
-                                    audit_entry_id: vec![0xff, 0xff, 0xff, 0xff],
+                                    audit_entry_id: String::new(),
                                     timeout_hint: 0,
                                     addition_header: OPCUAMessageAdditionalHeader {
                                         type_id: 0x0000,
@@ -1059,7 +1096,7 @@ mod tests {
                                 timestamp: vec![0x00, 0x3c, 0x7d, 0x0c, 0x5c, 0x2b, 0xca, 0x01],
                                 request_handle: 1,
                                 return_diagnostic: 0x000003ff,
-                                audit_entry_id: vec![0xff, 0xff, 0xff, 0xff],
+                                audit_entry_id: String::new(),
                                 timeout_hint: 0,
                                 addition_header: OPCUAMessageAdditionalHeader {
                                     type_id: 0x0000,
@@ -1085,7 +1122,7 @@ mod tests {
         let payload = &pcap[..];
         match parse_opcua(payload) {
             Ok((rem, opc_ua)) => {
-                //assert_eq!(rem.len(), 0);
+                assert_eq!(rem.len(), 0);
                 assert_eq!(opc_ua, OPCUA {
                     header: OPCUAHeader::MESSAGE(OPCUAMessageHeader {
                         message_type: String::from("MSG"),
@@ -1121,14 +1158,14 @@ mod tests {
                                         endpoint_url: String::from("opc.tcp://vm-xp-steven:12001/StackTestServer/AnsiC/2048"),
                                         server: OPCUAApplicationDescription {
                                             application_uri: String::from("http://vm-xp-steven/UA StackTest Server (AnsiC/2048)"),
-                                            product_uri: vec![0xff, 0xff, 0xff, 0xff],
+                                            product_uri: String::new(),
                                             application_name: OPCUALocalizedText {
                                                 encoding_mask: 0x02,
                                                 text: String::from("UA StackTest Server (AnsiC/2048)"),
                                             },
                                             application_type: 0x00000000,
-                                            gateway_server_uri: vec![0xff, 0xff, 0xff, 0xff],
-                                            discovery_profile_uri: vec![0xff, 0xff, 0xff, 0xff],
+                                            gateway_server_uri: String::new(),
+                                            discovery_profile_uri: String::new(),
                                             discovery_urls: OPCUADiscoveryUrls {
                                                 array_size: 1,
                                                 discovery_urls: vec![
@@ -1145,9 +1182,9 @@ mod tests {
                                                 OPCUAUserTokenPolicy {
                                                     policy_id: b'0',
                                                     user_token_type: 0x00000000,
-                                                    issued_token_type: vec![0xff, 0xff, 0xff, 0xff],
-                                                    issuer_endpoint_url: vec![0xff, 0xff, 0xff, 0xff],
-                                                    security_policy_uri: String::from("http://opcfoundation.org/UA/SecurityPolicy#Basic256").as_bytes().to_vec(),
+                                                    issued_token_type: String::new(),
+                                                    issuer_endpoint_url: String::new(),
+                                                    security_policy_uri: String::from("http://opcfoundation.org/UA/SecurityPolicy#Basic256"),
                                                 },
                                             ],
                                         },
@@ -1158,14 +1195,14 @@ mod tests {
                                         endpoint_url: String::from("opc.tcp://vm-xp-steven:12001/StackTestServer/AnsiC/2048"),
                                         server: OPCUAApplicationDescription {
                                             application_uri: String::from("http://vm-xp-steven/UA StackTest Server (AnsiC/2048)"),
-                                            product_uri: vec![0xff, 0xff, 0xff, 0xff],
+                                            product_uri: String::new(),
                                             application_name: OPCUALocalizedText {
                                                 encoding_mask: 0x02,
                                                 text: String::from("UA StackTest Server (AnsiC/2048)"),
                                             },
                                             application_type: 0x00000000,
-                                            gateway_server_uri: vec![0xff, 0xff, 0xff, 0xff],
-                                            discovery_profile_uri: vec![0xff, 0xff, 0xff, 0xff],
+                                            gateway_server_uri: String::new(),
+                                            discovery_profile_uri: String::new(),
                                             discovery_urls: OPCUADiscoveryUrls {
                                                 array_size: 1,
                                                 discovery_urls: vec![
@@ -1182,9 +1219,9 @@ mod tests {
                                                 OPCUAUserTokenPolicy {
                                                     policy_id: b'0',
                                                     user_token_type: 0x00000000,
-                                                    issued_token_type: vec![0xff, 0xff, 0xff, 0xff],
-                                                    issuer_endpoint_url: vec![0xff, 0xff, 0xff, 0xff],
-                                                    security_policy_uri: vec![0xff, 0xff, 0xff, 0xff],
+                                                    issued_token_type: String::new(),
+                                                    issuer_endpoint_url: String::new(),
+                                                    security_policy_uri: String::new(),
                                                 },
                                             ],
                                         },
@@ -1195,14 +1232,14 @@ mod tests {
                                         endpoint_url: String::from("opc.tcp://vm-xp-steven:12001/StackTestServer/AnsiC/2048"),
                                         server: OPCUAApplicationDescription {
                                             application_uri: String::from("http://vm-xp-steven/UA StackTest Server (AnsiC/2048)"),
-                                            product_uri: vec![0xff, 0xff, 0xff, 0xff],
+                                            product_uri: String::new(),
                                             application_name: OPCUALocalizedText {
                                                 encoding_mask: 0x02,
                                                 text: String::from("UA StackTest Server (AnsiC/2048)"),
                                             },
                                             application_type: 0x00000000,
-                                            gateway_server_uri: vec![0xff, 0xff, 0xff, 0xff],
-                                            discovery_profile_uri: vec![0xff, 0xff, 0xff, 0xff],
+                                            gateway_server_uri: String::new(),
+                                            discovery_profile_uri: String::new(),
                                             discovery_urls: OPCUADiscoveryUrls {
                                                 array_size: 1,
                                                 discovery_urls: vec![
@@ -1219,9 +1256,9 @@ mod tests {
                                                 OPCUAUserTokenPolicy {
                                                     policy_id: b'0',
                                                     user_token_type: 0x00000000,
-                                                    issued_token_type: vec![0xff, 0xff, 0xff, 0xff],
-                                                    issuer_endpoint_url: vec![0xff, 0xff, 0xff, 0xff],
-                                                    security_policy_uri: vec![0xff, 0xff, 0xff, 0xff],
+                                                    issued_token_type: String::new(),
+                                                    issuer_endpoint_url: String::new(),
+                                                    security_policy_uri: String::new(),
                                                 },
                                             ],
                                         },
@@ -1232,14 +1269,14 @@ mod tests {
                                         endpoint_url: String::from("opc.tcp://vm-xp-steven:12001/StackTestServer/AnsiC/2048"),
                                         server: OPCUAApplicationDescription {
                                             application_uri: String::from("http://vm-xp-steven/UA StackTest Server (AnsiC/2048)"),
-                                            product_uri: vec![0xff, 0xff, 0xff, 0xff],
+                                            product_uri: String::new(),
                                             application_name: OPCUALocalizedText {
                                                 encoding_mask: 0x02,
                                                 text: String::from("UA StackTest Server (AnsiC/2048)"),
                                             },
                                             application_type: 0x00000000,
-                                            gateway_server_uri: vec![0xff, 0xff, 0xff, 0xff],
-                                            discovery_profile_uri: vec![0xff, 0xff, 0xff, 0xff],
+                                            gateway_server_uri: String::new(),
+                                            discovery_profile_uri: String::new(),
                                             discovery_urls: OPCUADiscoveryUrls {
                                                 array_size: 1,
                                                 discovery_urls: vec![
@@ -1256,9 +1293,9 @@ mod tests {
                                                 OPCUAUserTokenPolicy {
                                                     policy_id: b'0',
                                                     user_token_type: 0x00000000,
-                                                    issued_token_type: vec![0xff, 0xff, 0xff, 0xff],
-                                                    issuer_endpoint_url: vec![0xff, 0xff, 0xff, 0xff],
-                                                    security_policy_uri: vec![0xff, 0xff, 0xff, 0xff],
+                                                    issued_token_type: String::new(),
+                                                    issuer_endpoint_url: String::new(),
+                                                    security_policy_uri: String::new(),
                                                 },
                                             ],
                                         },
@@ -1269,14 +1306,14 @@ mod tests {
                                         endpoint_url: String::from("opc.tcp://vm-xp-steven:12001/StackTestServer/AnsiC/2048"),
                                         server: OPCUAApplicationDescription {
                                             application_uri: String::from("http://vm-xp-steven/UA StackTest Server (AnsiC/2048)"),
-                                            product_uri: vec![0xff, 0xff, 0xff, 0xff],
+                                            product_uri: String::new(),
                                             application_name: OPCUALocalizedText {
                                                 encoding_mask: 0x02,
                                                 text: String::from("UA StackTest Server (AnsiC/2048)"),
                                             },
                                             application_type: 0x00000000,
-                                            gateway_server_uri: vec![0xff, 0xff, 0xff, 0xff],
-                                            discovery_profile_uri: vec![0xff, 0xff, 0xff, 0xff],
+                                            gateway_server_uri: String::new(),
+                                            discovery_profile_uri: String::new(),
                                             discovery_urls: OPCUADiscoveryUrls {
                                                 array_size: 1,
                                                 discovery_urls: vec![
@@ -1293,9 +1330,9 @@ mod tests {
                                                 OPCUAUserTokenPolicy {
                                                     policy_id: b'0',
                                                     user_token_type: 0x00000000,
-                                                    issued_token_type: vec![0xff, 0xff, 0xff, 0xff],
-                                                    issuer_endpoint_url: vec![0xff, 0xff, 0xff, 0xff],
-                                                    security_policy_uri: vec![0xff, 0xff, 0xff, 0xff],
+                                                    issued_token_type: String::new(),
+                                                    issuer_endpoint_url: String::new(),
+                                                    security_policy_uri: String::new(),
                                                 },
                                             ],
                                         },
@@ -1304,6 +1341,80 @@ mod tests {
                                     },
                                 ],
                             },
+                        }),
+                    }),
+                })
+            },
+            Err(_) => {
+                panic!("should not reach here");
+            }
+        }
+    }
+
+    #[test]
+    fn test_parse_opcua_create_session_request() {
+        let pcap = include_bytes!("pcaps/opcua/opcua_message_create_session_request.pcap");
+        let payload = &pcap[24+16+66..];
+        match parse_opcua(payload) {
+            Ok((rem, opc_ua)) => {
+                assert_eq!(rem.len(), 0);
+                assert_eq!(opc_ua, OPCUA {
+                    header: OPCUAHeader::MESSAGE(OPCUAMessageHeader {
+                        message_type: String::from("MSG"),
+                        chunk_type: b'F',
+                        message_size: 1113,
+                        security_channel_id: 6495,
+                        security_token_id: 1,
+                        security_sequence_number: 3,
+                        security_request_id: 3,
+                    }),
+                    contents: OPCUAContents::MESSAGE(OPCUAMessage {
+                        type_id: OPCUAMessageTypeId {
+                            encoding_mask: 0x01,
+                            namespace_index: 0,
+                            identifier_numeric: 461,
+                        },
+                        message: OPCUASpecificMessage::CREATE_SESSION_REQUEST(OPCUACreateSessionRequest {
+                            request_header: OPCUAMessageRequestHeader {
+                                authorization_token: 0x0000,
+                                timestamp: vec![0x00, 0x3c, 0x7d, 0x0c, 0x5c, 0x2b, 0xca, 0x01],
+                                request_handle: 1,
+                                return_diagnostic: 0x000003ff,
+                                audit_entry_id: String::new(),
+                                timeout_hint: 0,
+                                addition_header: OPCUAMessageAdditionalHeader {
+                                    type_id: 0x0000,
+                                    encoding_mask: 0x00,
+                                },
+                            },
+                            client_description: OPCUAApplicationDescription {
+                                application_uri: String::from("uri://AchillesSatellite/Opc.Ua.ServerTestTool/55ea864a-2be8-4bc6-bb73-1123c54d0fc4"),
+                                product_uri: String::from("urn:opcfoundation.org/UA/ServerTest"),
+                                application_name: OPCUALocalizedText {
+                                    encoding_mask: 0x02,
+                                    text: String::from("ApplicationName"),
+                                },
+                                application_type: 0x000000001,
+                                gateway_server_uri: String::new(),
+                                discovery_profile_uri: String::new(),
+                                discovery_urls: OPCUADiscoveryUrls {
+                                    array_size: 0,
+                                    discovery_urls: vec![],
+                                },
+                            },
+                            server_uri: String::from("http://vm-xp-steven/UA StackTest Server (AnsiC/2048)"),
+                            endpoint_url: String::from("opc.tcp://vm-xp-steven:12001/UA/StackTestServer"),
+                            session_name: String::from("MySession 1"),
+                            client_nonce: vec![
+                                            0x20, 0x00, 0x00, 0x00, 0x40, 0x6d,
+                                0x59, 0x31, 0xba, 0x64, 0x40, 0x41, 0xe1, 0x42,
+                                0xa3, 0x90, 0xe8, 0xba, 0xda, 0xc6, 0x82, 0x62,
+                                0xb2, 0x4f, 0x0a, 0x30, 0xdc, 0x3d, 0x63, 0x9d,
+                                0x88, 0xc0, 0x23, 0x68, 0x41, 0xbf
+                            ],
+                            client_certificate: vec![48, 130, 2, 201, 48, 130, 2, 54, 160, 3, 2, 1, 2, 2, 16, 30, 89, 53, 107, 11, 128, 1, 167, 69, 232, 14, 248, 215, 164, 210, 35, 48, 9, 6, 5, 43, 14, 3, 2, 29, 5, 0, 48, 54, 49, 25, 48, 23, 6, 10, 9, 146, 38, 137, 147, 242, 44, 100, 1, 25, 22, 9, 97, 110, 111, 111, 112, 120, 112, 118, 109, 49, 25, 48, 23, 6, 3, 85, 4, 3, 19, 16, 85, 65, 32, 83, 97, 109, 112, 108, 101, 32, 67, 108, 105, 101, 110, 116, 48, 30, 23, 13, 48, 57, 48, 55, 50, 52, 49, 54, 50, 48, 49, 56, 90, 23, 13, 49, 57, 48, 55, 50, 52, 49, 54, 50, 48, 49, 56, 90, 48, 54, 49, 25, 48, 23, 6, 10, 9, 146, 38, 137, 147, 242, 44, 100, 1, 25, 22, 9, 97, 110, 111, 111, 112, 120, 112, 118, 109, 49, 25, 48, 23, 6, 3, 85, 4, 3, 19, 16, 85, 65, 32, 83, 97, 109, 112, 108, 101, 32, 67, 108, 105, 101, 110, 116, 48, 129, 159, 48, 13, 6, 9, 42, 134, 72, 134, 247, 13, 1, 1, 1, 5, 0, 3, 129, 141, 0, 48, 129, 137, 2, 129, 129, 0, 168, 33, 158, 185, 195, 221, 85, 128, 132, 237, 213, 150, 54, 126, 213, 49, 208, 26, 28, 188, 80, 206, 146, 228, 11, 135, 138, 5, 208, 78, 74, 71, 242, 132, 244, 250, 114, 136, 212, 80, 158, 13, 236, 186, 219, 25, 30, 218, 71, 104, 178, 42, 122, 232, 82, 178, 1, 34, 52, 231, 56, 63, 8, 90, 25, 35, 70, 152, 178, 175, 104, 199, 68, 25, 43, 139, 67, 64, 41, 11, 198, 155, 220, 37, 159, 117, 96, 99, 24, 71, 50, 246, 240, 166, 109, 0, 203, 208, 234, 79, 196, 221, 204, 72, 241, 95, 220, 70, 205, 15, 156, 23, 66, 67, 223, 127, 139, 22, 89, 100, 9, 126, 103, 155, 175, 209, 77, 255, 2, 3, 1, 0, 1, 163, 129, 223, 48, 129, 220, 48, 29, 6, 3, 85, 29, 14, 4, 22, 4, 20, 171, 116, 254, 123, 143, 167, 61, 167, 214, 177, 56, 224, 255, 72, 247, 245, 144, 90, 86, 211, 48, 31, 6, 3, 85, 29, 1, 4, 24, 48, 22, 128, 20, 171, 116, 254, 123, 143, 167, 61, 167, 214, 177, 56, 224, 255, 72, 247, 245, 144, 90, 86, 211, 48, 12, 6, 3, 85, 29, 19, 1, 1, 255, 4, 2, 48, 0, 48, 14, 6, 3, 85, 29, 15, 1, 1, 255, 4, 4, 3, 2, 2, 244, 48, 32, 6, 3, 85, 29, 37, 1, 1, 255, 4, 22, 48, 20, 6, 8, 43, 6, 1, 5, 5, 7, 3, 1, 6, 8, 43, 6, 1, 5, 5, 7, 3, 2, 48, 90, 6, 3, 85, 29, 7, 4, 83, 48, 81, 134, 68, 117, 114, 105, 58, 47, 47, 86, 49, 55, 48, 48, 47, 79, 112, 99, 46, 85, 97, 46, 83, 97, 109, 112, 108, 101, 67, 108, 105, 101, 110, 116, 47, 50, 49, 54, 57, 98, 56, 97, 99, 45, 56, 56, 101, 52, 45, 52, 56, 51, 49, 45, 57, 51, 99, 52, 45, 97, 51, 50, 53, 97, 49, 97, 98, 100, 49, 57, 98, 130, 9, 97, 110, 111, 111, 112, 120, 112, 118, 109, 48, 9, 6, 5, 43, 14, 3, 2, 29, 5, 0, 3, 129, 129, 0, 155, 236, 49, 60, 16, 184, 28, 242, 110, 236, 8, 48, 60, 115, 71, 253, 154, 228, 220, 230, 91, 251, 149, 182, 48, 156, 171, 170, 152, 105, 114, 160, 45, 215, 10, 231, 254, 244, 111, 200, 85, 58, 155, 55, 36, 69, 99, 149, 66, 71, 197, 99, 44, 205, 7, 14, 99, 148, 20, 88, 197, 124, 75, 20, 185, 29, 186, 249, 135, 80, 129, 126, 85, 74, 186, 52, 210, 180, 171, 38, 111, 29, 26, 78, 102, 113, 219, 17, 132, 78, 70, 136, 155, 58, 144, 62, 8, 175, 92, 193, 199, 189, 124, 6, 252, 38, 242, 25, 108, 221, 159, 132, 149, 178, 243, 202, 84, 209, 78, 83, 207, 124, 202, 14, 207, 179, 21, 109],
+                            requested_session_timeout: vec![0x00, 0x00, 0x00, 0x00, 0x00, 0x4c, 0xed, 0x40],
+                            max_response_message_size: 4194304,
                         }),
                     }),
                 })
