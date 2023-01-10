@@ -205,9 +205,48 @@ pub struct OPCUACreateSessionResponse {
 }
 
 #[derive(Debug, PartialEq)]
+pub struct OPCUASignatureData {
+    algorithm: String,
+    signature: String,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct OPCUASignedSoftwareCertificate {
+
+}
+
+#[derive(Debug, PartialEq)]
+pub struct OPCUASignatureSoftwareCertificates {
+    array_size: u32,
+    signed_software_certificates: Vec<OPCUASignedSoftwareCertificate>,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct OPCUALocaleIds {
+    array_size: u32,
+    locale_ids: Vec<String>,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct OPCUAAnonymousIdentityToken {
+    policy_id: u8,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct OPCUAExtensionObject {
+    type_id: OPCUAMessageTypeId,
+    encoding_mask: u8,
+    anonymous_identity_token: OPCUAAnonymousIdentityToken,
+}
+
+#[derive(Debug, PartialEq)]
 pub struct OPCUAActivateSessionRequest {
     request_header: OPCUAMessageRequestHeader,
-    /* FIXME */
+    client_signature: OPCUASignatureData,
+    client_software_certificates: OPCUASignatureSoftwareCertificates,
+    locale_ids: OPCUALocaleIds,
+    user_identity_token: OPCUAExtensionObject,
+    user_token_signature: OPCUASignatureData,
 }
 
 #[derive(Debug, PartialEq)]
@@ -420,6 +459,19 @@ pub fn parse_opcua_message_security_token(input: &[u8]) -> IResult<&[u8], OPCUAO
     }))
 }
 
+pub fn parse_opcua_message_identifier_numeric(input: &[u8]) -> IResult<&[u8], u16> {
+    let (rem, encoding_mask) = le_u8(input)?;
+    let (rem, identifier_numeric) = if encoding_mask == 0 {
+        let (rem, data) = le_u8(rem)?;
+        (rem, data as u16)
+    } else {
+        let (rem, _) = le_u8(rem)?;
+        let (rem, identifier_numeric) = le_u16(rem)?;
+        (rem, identifier_numeric)
+    };
+    Ok((rem, identifier_numeric))
+}
+
 pub fn parse_opcua_message_request_header(input: &[u8]) -> IResult<&[u8], OPCUAMessageRequestHeader> {
     let (rem, (
         authorization_token,
@@ -430,7 +482,7 @@ pub fn parse_opcua_message_request_header(input: &[u8]) -> IResult<&[u8], OPCUAM
         timeout_hint,
         addition_header,
     )) = tuple((
-        le_u16,
+        parse_opcua_message_identifier_numeric,
         take(8usize),
         le_u32,
         le_u32,
@@ -777,16 +829,90 @@ pub fn parse_opcua_msg_create_session_response(input: &[u8]) -> IResult<&[u8], O
     }))
 }
 
-pub fn parse_opcua_msg_activate_session_request(input: &[u8]) -> IResult<&[u8], OPCUAActivateSessionRequest> {
+pub fn parse_opcua_message_signature_data(input: &[u8]) -> IResult<&[u8], OPCUASignatureData> {
     let (rem, (
-        request_header,
-        _,
+        algorithm,
+        signature,
     )) = tuple((
-        parse_opcua_message_request_header,
-        rest,
+        parse_opcua_null_string,
+        parse_opcua_null_string,
     ))(input)?;
+    Ok((rem, OPCUASignatureData {
+        algorithm,
+        signature,
+    }))
+}
+
+pub fn parse_opcua_message_signature_software_certificates(input: &[u8]) -> IResult<&[u8], OPCUASignatureSoftwareCertificates> {
+    let (rem, array_size) = le_u32(input)?;
+    Ok((rem, OPCUASignatureSoftwareCertificates {
+        array_size,
+        signed_software_certificates: Vec::new(),
+    }))
+}
+
+pub fn parse_opcua_message_locale_id(input: &[u8]) -> IResult<&[u8], String> {
+    let (rem, locale_id) = length_data(le_u32)(input)?;
+    Ok((rem, String::from_utf8(locale_id.to_vec()).unwrap()))
+}
+pub fn parse_opcua_message_locale_ids(input: &[u8]) -> IResult<&[u8], OPCUALocaleIds> {
+    let (rem, array_size) = le_u32(input)?;
+    let (rem, locale_ids) = count(parse_opcua_message_locale_id, array_size as usize)(rem)?;
+    Ok((rem, OPCUALocaleIds {
+        array_size,
+        locale_ids,
+    }))
+}
+
+pub fn parse_opcua_message_anonymous_identity_token(input: &[u8]) -> IResult<&[u8], OPCUAAnonymousIdentityToken> {
+    let (rem, data) = length_data(le_u32)(input)?;
+    let (_, policy_id) = length_data(le_u32)(data)?;
+    Ok((rem, OPCUAAnonymousIdentityToken {
+        policy_id: policy_id[0],
+    }))
+}
+
+pub fn parse_opcua_message_extension_object(input: &[u8]) -> IResult<&[u8], OPCUAExtensionObject> {
+    let (rem, (
+        type_id,
+        encoding_mask,
+        anonymous_identity_token,
+    )) = tuple((
+        parse_opcua_message_type_id,
+        le_u8,
+        parse_opcua_message_anonymous_identity_token,
+    ))(input)?;
+    Ok((rem, OPCUAExtensionObject {
+        type_id,
+        encoding_mask,
+        anonymous_identity_token,
+    }))
+}
+
+pub fn parse_opcua_msg_activate_session_request(input: &[u8]) -> IResult<&[u8], OPCUAActivateSessionRequest> {
+    let (rem, request_header) = parse_opcua_message_request_header(input)?;
+    let (rem, (
+        //request_header,
+        client_signature,
+        client_software_certificates,
+        locale_ids,
+        user_identity_token,
+        user_token_signature,
+    )) = tuple((
+        //parse_opcua_message_request_header,
+        parse_opcua_message_signature_data,
+        parse_opcua_message_signature_software_certificates,
+        parse_opcua_message_locale_ids,
+        parse_opcua_message_extension_object,
+        parse_opcua_message_signature_data,
+    ))(rem)?;
     Ok((rem, OPCUAActivateSessionRequest {
         request_header,
+        client_signature,
+        client_software_certificates,
+        locale_ids,
+        user_identity_token,
+        user_token_signature,
     }))
 }
 
@@ -1418,6 +1544,81 @@ mod tests {
                         }),
                     }),
                 })
+            },
+            Err(_) => {
+                panic!("should not reach here");
+            }
+        }
+    }
+
+    #[test]
+    fn test_parse_opcua_activate_session_request() {
+        let pcap = include_bytes!("pcaps/opcua/opcua_message_activate_session_request.pcap");
+        let payload = &pcap[24+16+66..];
+        match parse_opcua(payload) {
+            Ok((rem, opc_ua)) => {
+                assert_eq!(rem.len(), 0);
+                assert_eq!(opc_ua, OPCUA {
+                    header: OPCUAHeader::MESSAGE(OPCUAMessageHeader {
+                        message_type: String::from("MSG"),
+                        chunk_type: b'F',
+                        message_size: 106,
+                        security_channel_id: 6495,
+                        security_token_id: 1,
+                        security_sequence_number: 4,
+                        security_request_id: 4,
+                    }),
+                    contents: OPCUAContents::MESSAGE(OPCUAMessage {
+                        type_id: OPCUAMessageTypeId {
+                            encoding_mask: 0x01,
+                            namespace_index: 0,
+                            identifier_numeric: 467,
+                        },
+                        message: OPCUASpecificMessage::ACTIVATE_SESSION_REQUEST(OPCUAActivateSessionRequest {
+                            request_header: OPCUAMessageRequestHeader {
+                                authorization_token: 6527,
+                                timestamp: vec![0x00, 0x3c, 0x7d, 0x0c, 0x5c, 0x2b, 0xca, 0x01],
+                                request_handle: 1,
+                                return_diagnostic: 0x000003ff,
+                                audit_entry_id: String::new(),
+                                timeout_hint: 0,
+                                addition_header: OPCUAMessageAdditionalHeader {
+                                    type_id: 0x0000,
+                                    encoding_mask: 0x00,
+                                },
+                            },
+                            client_signature: OPCUASignatureData {
+                                algorithm: String::new(),
+                                signature: String::new(),
+                            },
+                            client_software_certificates: OPCUASignatureSoftwareCertificates {
+                                array_size: 0,
+                                signed_software_certificates: vec![],
+                            },
+                            locale_ids: OPCUALocaleIds {
+                                array_size: 1,
+                                locale_ids: vec![
+                                    String::from("en-US"),
+                                ],
+                            },
+                            user_identity_token: OPCUAExtensionObject {
+                                type_id: OPCUAMessageTypeId {
+                                    encoding_mask: 1,
+                                    namespace_index: 0,
+                                    identifier_numeric: 321,
+                                },
+                                encoding_mask: 0x01,
+                                anonymous_identity_token: OPCUAAnonymousIdentityToken {
+                                    policy_id: b'0',
+                                },
+                            },
+                            user_token_signature: OPCUASignatureData {
+                                algorithm: String::new(),
+                                signature: String::new(),
+                            },
+                        }),
+                    }),
+                });
             },
             Err(_) => {
                 panic!("should not reach here");
