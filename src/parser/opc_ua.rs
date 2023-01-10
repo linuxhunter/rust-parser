@@ -1,8 +1,6 @@
 use nom7::{IResult, sequence::tuple, bytes::complete::take, number::complete::{le_u8, le_u32, le_u16}, multi::{length_data, count}, combinator::rest};
 
 const OPCUA_MESSAGE_TYPE_LENGTH: usize = 3;
-const OPCUA_SENDER_CERTIFICATE_LENGTH: usize = 4;
-const OPCUA_RECEIVER_CERTIFICATE_THUMBPRINT_LENGTH: usize = 4;
 
 #[derive(Debug, PartialEq)]
 pub struct OPCUAHelloHeader {
@@ -23,8 +21,8 @@ pub struct OPCUAOpenHeader {
     message_size: u32,
     secure_channel_id: u32,
     security_policy_uri: String,
-    sender_certificate: Vec<u8>,
-    receiver_certificate_thumbprint: Vec<u8>,
+    sender_certificate: String,
+    receiver_certificate_thumbprint: String,
     sequence_number: u32,
     request_id: u32,
 }
@@ -46,15 +44,15 @@ pub struct OPCUAHelloMessage {
 }
 
 #[derive(Debug, PartialEq)]
-pub struct OPCUAMessageTypeId {
+pub struct OPCUAExpandedNodeId {
     encoding_mask: u8,
     namespace_index: u8,
-    identifier_numeric: u16,
+    identifier_numeric: u32,
 }
 
 #[derive(Debug, PartialEq)]
 pub struct OPCUAMessageAdditionalHeader {
-    type_id: u16,
+    type_id: OPCUAExpandedNodeId,
     encoding_mask: u8,
 }
 
@@ -118,21 +116,15 @@ pub struct OPCUAOpenMessageResponse {
 #[derive(Debug, PartialEq)]
 pub struct OPCUAGetEndpointRequest {
     request_header: OPCUAMessageRequestHeader,
-    endpoint_url: Vec<u8>,
-    local_ids: Vec<u8>,
-    profile_uris: Vec<u8>,
+    endpoint_url: String,
+    local_ids: OPCUAStringArray,
+    profile_uris: OPCUAStringArray,
 }
 
 #[derive(Debug, PartialEq)]
 pub struct OPCUALocalizedText {
     encoding_mask: u8,
     text: String,
-}
-
-#[derive(Debug, PartialEq)]
-pub struct OPCUADiscoveryUrls {
-    array_size: u32,
-    discovery_urls: Vec<String>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -143,7 +135,7 @@ pub struct OPCUAApplicationDescription {
     application_type: u32,
     gateway_server_uri: String,
     discovery_profile_uri: String,
-    discovery_urls: OPCUADiscoveryUrls,
+    discovery_urls: OPCUAStringArray,
 }
 
 #[derive(Debug, PartialEq)]
@@ -222,9 +214,9 @@ pub struct OPCUASignatureSoftwareCertificates {
 }
 
 #[derive(Debug, PartialEq)]
-pub struct OPCUALocaleIds {
+pub struct OPCUAStringArray {
     array_size: u32,
-    locale_ids: Vec<String>,
+    array_value: Vec<String>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -234,7 +226,7 @@ pub struct OPCUAAnonymousIdentityToken {
 
 #[derive(Debug, PartialEq)]
 pub struct OPCUAExtensionObject {
-    type_id: OPCUAMessageTypeId,
+    type_id: OPCUAExpandedNodeId,
     encoding_mask: u8,
     anonymous_identity_token: OPCUAAnonymousIdentityToken,
 }
@@ -244,7 +236,7 @@ pub struct OPCUAActivateSessionRequest {
     request_header: OPCUAMessageRequestHeader,
     client_signature: OPCUASignatureData,
     client_software_certificates: OPCUASignatureSoftwareCertificates,
-    locale_ids: OPCUALocaleIds,
+    locale_ids: OPCUAStringArray,
     user_identity_token: OPCUAExtensionObject,
     user_token_signature: OPCUASignatureData,
 }
@@ -287,7 +279,7 @@ pub enum OPCUASpecificMessage {
 
 #[derive(Debug, PartialEq)]
 pub struct OPCUAMessage {
-    type_id: OPCUAMessageTypeId,
+    type_id: OPCUAExpandedNodeId,
     message: OPCUASpecificMessage,
 }
 
@@ -379,8 +371,8 @@ pub fn parse_opcua_open_header(input: &[u8]) -> IResult<&[u8], OPCUAOpenHeader> 
         le_u32,
         le_u32,
         length_data(le_u32),
-        take(OPCUA_SENDER_CERTIFICATE_LENGTH),
-        take(OPCUA_RECEIVER_CERTIFICATE_THUMBPRINT_LENGTH),
+        parse_opcua_null_string,
+        parse_opcua_null_string,
         le_u32,
         le_u32,
     ))(input)?;
@@ -390,8 +382,8 @@ pub fn parse_opcua_open_header(input: &[u8]) -> IResult<&[u8], OPCUAOpenHeader> 
         message_size,
         secure_channel_id,
         security_policy_uri: String::from_utf8(security_policy_uri.to_vec()).unwrap(),
-        sender_certificate: sender_certificate.to_vec(),
-        receiver_certificate_thumbprint: receiver_certificate_thumbprint.to_vec(),
+        sender_certificate,
+        receiver_certificate_thumbprint,
         sequence_number,
         request_id,
     }))
@@ -426,21 +418,39 @@ pub fn parse_opcua_message_header(input: &[u8]) -> IResult<&[u8], OPCUAMessageHe
     }))
 }
 
-pub fn parse_opcua_message_type_id(input: &[u8]) -> IResult<&[u8], OPCUAMessageTypeId> {
-    let (rem, (
-        encoding_mask,
-        namespace_index,
-        identifier_numeric,
-    )) = tuple((
-        le_u8,
-        le_u8,
-        le_u16,
-    ))(input)?;
-    Ok((rem, OPCUAMessageTypeId {
-        encoding_mask,
-        namespace_index,
-        identifier_numeric,
-    }))
+pub fn parse_opcua_message_type_id(input: &[u8]) -> IResult<&[u8], OPCUAExpandedNodeId> {
+    let (rem, encoding_mask) = le_u8(input)?;
+    match encoding_mask {
+        0x00 => {
+            let (rem, identifier_numeric) = le_u8(rem)?;
+            Ok((rem, OPCUAExpandedNodeId {
+                encoding_mask,
+                namespace_index: 0,
+                identifier_numeric: identifier_numeric as u32,
+            }))
+        },
+        0x01 => {
+            let (rem, namespace_index) = le_u8(rem)?;
+            let (rem, identifier_numeric) = le_u16(rem)?;
+            Ok((rem, OPCUAExpandedNodeId {
+                encoding_mask,
+                namespace_index,
+                identifier_numeric: identifier_numeric as u32,
+            }))
+        },
+        0x02 => {
+            let (rem, namespace_index) = le_u8(rem)?;
+            let (rem, identifier_numeric) = le_u32(rem)?;
+            Ok((rem, OPCUAExpandedNodeId {
+                encoding_mask,
+                namespace_index,
+                identifier_numeric,
+            }))
+        },
+        _ => {
+            unimplemented!();
+        }
+    }
 }
 
 pub fn parse_opcua_message_additional_header(input: &[u8]) -> IResult<&[u8], OPCUAMessageAdditionalHeader> {
@@ -448,7 +458,7 @@ pub fn parse_opcua_message_additional_header(input: &[u8]) -> IResult<&[u8], OPC
         type_id,
         encoding_mask,
     )) = tuple((
-        le_u16,
+        parse_opcua_message_type_id,
         le_u8,
     ))(input)?;
     Ok((rem, OPCUAMessageAdditionalHeader {
@@ -628,15 +638,15 @@ pub fn parse_opcua_msg_get_endpoint_request(input: &[u8]) -> IResult<&[u8], OPCU
         profile_uris,
     )) = tuple((
         parse_opcua_message_request_header,
-        take(4usize),
-        take(4usize),
-        take(4usize),
+        parse_opcua_null_string,
+        parse_opcua_string_array,
+        parse_opcua_string_array,
     ))(input)?;
     Ok((rem, OPCUAGetEndpointRequest {
         request_header,
-        endpoint_url: endpoint_url.to_vec(),
-        local_ids: local_ids.to_vec(),
-        profile_uris: profile_uris.to_vec(),
+        endpoint_url,
+        local_ids,
+        profile_uris,
     }))
 }
 
@@ -657,19 +667,6 @@ pub fn parse_opcua_message_application_description_application_name(input: &[u8]
 pub fn parse_opcua_message_application_description_discovery_url(input: &[u8]) -> IResult<&[u8], String> {
     let (rem, discovery_url) = length_data(le_u32)(input)?;
     Ok((rem, String::from_utf8(discovery_url.to_vec()).unwrap()))
-}
-
-pub fn parse_opcua_message_application_description_discovery_urls(input: &[u8]) -> IResult<&[u8], OPCUADiscoveryUrls> {
-    let (rem, array_size) = le_u32(input)?;
-    let (rem, discovery_urls) = if array_size == 0 {
-        (rem, Vec::new())
-    } else {
-        count(parse_opcua_message_application_description_discovery_url, array_size as usize)(rem)?
-    };
-    Ok((rem, OPCUADiscoveryUrls {
-        array_size,
-        discovery_urls,
-    }))
 }
 
 pub fn parse_opcua_null_string(input: &[u8]) -> IResult<&[u8], String> {
@@ -697,7 +694,7 @@ pub fn parse_opcua_message_application_description(input: &[u8]) -> IResult<&[u8
         le_u32,
         parse_opcua_null_string,
         parse_opcua_null_string,
-        parse_opcua_message_application_description_discovery_urls,
+        parse_opcua_string_array,
     ))(input)?;
     Ok((rem, OPCUAApplicationDescription {
         application_uri: String::from_utf8(application_uri.to_vec()).unwrap(),
@@ -873,12 +870,12 @@ pub fn parse_opcua_message_locale_id(input: &[u8]) -> IResult<&[u8], String> {
     let (rem, locale_id) = length_data(le_u32)(input)?;
     Ok((rem, String::from_utf8(locale_id.to_vec()).unwrap()))
 }
-pub fn parse_opcua_message_locale_ids(input: &[u8]) -> IResult<&[u8], OPCUALocaleIds> {
+pub fn parse_opcua_string_array(input: &[u8]) -> IResult<&[u8], OPCUAStringArray> {
     let (rem, array_size) = le_u32(input)?;
-    let (rem, locale_ids) = count(parse_opcua_message_locale_id, array_size as usize)(rem)?;
-    Ok((rem, OPCUALocaleIds {
+    let (rem, array_value) = count(parse_opcua_message_locale_id, array_size as usize)(rem)?;
+    Ok((rem, OPCUAStringArray {
         array_size,
-        locale_ids,
+        array_value,
     }))
 }
 
@@ -920,7 +917,7 @@ pub fn parse_opcua_msg_activate_session_request(input: &[u8]) -> IResult<&[u8], 
         //parse_opcua_message_request_header,
         parse_opcua_message_signature_data,
         parse_opcua_message_signature_software_certificates,
-        parse_opcua_message_locale_ids,
+        parse_opcua_string_array,
         parse_opcua_message_extension_object,
         parse_opcua_message_signature_data,
     ))(rem)?;
@@ -1138,13 +1135,13 @@ mod tests {
                         message_size: 132,
                         secure_channel_id: 0,
                         security_policy_uri: String::from("http://opcfoundation.org/UA/SecurityPolicy#None"),
-                        sender_certificate: vec![0xff, 0xff, 0xff, 0xff],
-                        receiver_certificate_thumbprint: vec![0xff, 0xff, 0xff, 0xff],
+                        sender_certificate: String::new(),
+                        receiver_certificate_thumbprint: String::new(),
                         sequence_number: 1,
                         request_id: 1,
                     }),
                     contents: OPCUAContents::OPEN(OPCUAMessage {
-                        type_id: OPCUAMessageTypeId {
+                        type_id: OPCUAExpandedNodeId {
                             encoding_mask: 0x01,
                             namespace_index: 0,
                             identifier_numeric: 446,
@@ -1159,7 +1156,11 @@ mod tests {
                                     audit_entry_id: String::new(),
                                     timeout_hint: 0,
                                     addition_header: OPCUAMessageAdditionalHeader {
-                                        type_id: 0x0000,
+                                        type_id: OPCUAExpandedNodeId {
+                                            encoding_mask: 0,
+                                            namespace_index: 0,
+                                            identifier_numeric: 0,
+                                        },
                                         encoding_mask: 0x00,
                                     },
                                 },
@@ -1193,13 +1194,13 @@ mod tests {
                         message_size: 136,
                         secure_channel_id: 6495,
                         security_policy_uri: String::from("http://opcfoundation.org/UA/SecurityPolicy#None"),
-                        sender_certificate: vec![0xff, 0xff, 0xff, 0xff],
-                        receiver_certificate_thumbprint: vec![0xff, 0xff, 0xff, 0xff],
+                        sender_certificate: String::new(),
+                        receiver_certificate_thumbprint: String::new(),
                         sequence_number: 51,
                         request_id: 1,
                     }),
                     contents: OPCUAContents::OPEN(OPCUAMessage {
-                        type_id: OPCUAMessageTypeId {
+                        type_id: OPCUAExpandedNodeId {
                             encoding_mask: 0x01,
                             namespace_index: 0,
                             identifier_numeric: 449,
@@ -1213,7 +1214,11 @@ mod tests {
                                     service_diagnostics: 0x00,
                                     string_table: vec![0xff, 0xff, 0xff, 0xff],
                                     additional_header: OPCUAMessageAdditionalHeader {
-                                        type_id: 0x0000,
+                                        type_id: OPCUAExpandedNodeId {
+                                            encoding_mask: 0,
+                                            namespace_index: 0,
+                                            identifier_numeric: 0,
+                                        },
                                         encoding_mask: 0x00,
                                     },
                                 },
@@ -1254,7 +1259,7 @@ mod tests {
                         security_request_id: 2,
                     }),
                     contents: OPCUAContents::MESSAGE(OPCUAMessage {
-                        type_id: OPCUAMessageTypeId {
+                        type_id: OPCUAExpandedNodeId {
                             encoding_mask: 0x01,
                             namespace_index: 0,
                             identifier_numeric: 428,
@@ -1268,13 +1273,23 @@ mod tests {
                                 audit_entry_id: String::new(),
                                 timeout_hint: 0,
                                 addition_header: OPCUAMessageAdditionalHeader {
-                                    type_id: 0x0000,
+                                    type_id: OPCUAExpandedNodeId {
+                                        encoding_mask: 0,
+                                        namespace_index: 0,
+                                        identifier_numeric: 0,
+                                    },
                                     encoding_mask: 0x00,
                                 },
                             },
-                            endpoint_url: vec![0xff, 0xff, 0xff, 0xff],
-                            local_ids: vec![0x00, 0x00, 0x00, 0x00],
-                            profile_uris: vec![0x00, 0x00, 0x00, 0x00],
+                            endpoint_url: String::new(),
+                            local_ids: OPCUAStringArray {
+                                array_size: 0,
+                                array_value: vec![],
+                            },
+                            profile_uris: OPCUAStringArray {
+                                array_size: 0,
+                                array_value: vec![],
+                            },
                         }),
                     }),
                 })
@@ -1303,7 +1318,7 @@ mod tests {
                         security_request_id: 2,
                     }),
                     contents: OPCUAContents::MESSAGE(OPCUAMessage {
-                        type_id: OPCUAMessageTypeId {
+                        type_id: OPCUAExpandedNodeId {
                             encoding_mask: 0x01,
                             namespace_index: 0,
                             identifier_numeric: 431,
@@ -1316,7 +1331,11 @@ mod tests {
                                 service_diagnostics: 0x00,
                                 string_table: vec![0x00, 0x00, 0x00, 0x00],
                                 additional_header: OPCUAMessageAdditionalHeader {
-                                    type_id: 0x0000,
+                                    type_id: OPCUAExpandedNodeId {
+                                        encoding_mask: 0,
+                                        namespace_index: 0,
+                                        identifier_numeric: 0,
+                                    },
                                     encoding_mask: 0x00,
                                 },
                             },
@@ -1335,9 +1354,9 @@ mod tests {
                                             application_type: 0x00000000,
                                             gateway_server_uri: String::new(),
                                             discovery_profile_uri: String::new(),
-                                            discovery_urls: OPCUADiscoveryUrls {
+                                            discovery_urls: OPCUAStringArray {
                                                 array_size: 1,
-                                                discovery_urls: vec![
+                                                array_value: vec![
                                                     String::from("opc.tcp://vm-xp-steven:12001/StackTestServer/AnsiC/2048"),
                                                 ],
                                             },
@@ -1372,9 +1391,9 @@ mod tests {
                                             application_type: 0x00000000,
                                             gateway_server_uri: String::new(),
                                             discovery_profile_uri: String::new(),
-                                            discovery_urls: OPCUADiscoveryUrls {
+                                            discovery_urls: OPCUAStringArray {
                                                 array_size: 1,
-                                                discovery_urls: vec![
+                                                array_value: vec![
                                                     String::from("opc.tcp://vm-xp-steven:12001/StackTestServer/AnsiC/2048"),
                                                 ],
                                             },
@@ -1409,9 +1428,9 @@ mod tests {
                                             application_type: 0x00000000,
                                             gateway_server_uri: String::new(),
                                             discovery_profile_uri: String::new(),
-                                            discovery_urls: OPCUADiscoveryUrls {
+                                            discovery_urls: OPCUAStringArray {
                                                 array_size: 1,
-                                                discovery_urls: vec![
+                                                array_value: vec![
                                                     String::from("opc.tcp://vm-xp-steven:12001/StackTestServer/AnsiC/2048"),
                                                 ],
                                             },
@@ -1446,9 +1465,9 @@ mod tests {
                                             application_type: 0x00000000,
                                             gateway_server_uri: String::new(),
                                             discovery_profile_uri: String::new(),
-                                            discovery_urls: OPCUADiscoveryUrls {
+                                            discovery_urls: OPCUAStringArray {
                                                 array_size: 1,
-                                                discovery_urls: vec![
+                                                array_value: vec![
                                                     String::from("opc.tcp://vm-xp-steven:12001/StackTestServer/AnsiC/2048"),
                                                 ],
                                             },
@@ -1483,9 +1502,9 @@ mod tests {
                                             application_type: 0x00000000,
                                             gateway_server_uri: String::new(),
                                             discovery_profile_uri: String::new(),
-                                            discovery_urls: OPCUADiscoveryUrls {
+                                            discovery_urls: OPCUAStringArray {
                                                 array_size: 1,
-                                                discovery_urls: vec![
+                                                array_value: vec![
                                                     String::from("opc.tcp://vm-xp-steven:12001/StackTestServer/AnsiC/2048"),
                                                 ],
                                             },
@@ -1538,7 +1557,7 @@ mod tests {
                         security_request_id: 3,
                     }),
                     contents: OPCUAContents::MESSAGE(OPCUAMessage {
-                        type_id: OPCUAMessageTypeId {
+                        type_id: OPCUAExpandedNodeId {
                             encoding_mask: 0x01,
                             namespace_index: 0,
                             identifier_numeric: 461,
@@ -1552,7 +1571,11 @@ mod tests {
                                 audit_entry_id: String::new(),
                                 timeout_hint: 0,
                                 addition_header: OPCUAMessageAdditionalHeader {
-                                    type_id: 0x0000,
+                                    type_id: OPCUAExpandedNodeId {
+                                        encoding_mask: 0,
+                                        namespace_index: 0,
+                                        identifier_numeric: 0,
+                                    },
                                     encoding_mask: 0x00,
                                 },
                             },
@@ -1566,9 +1589,9 @@ mod tests {
                                 application_type: 0x000000001,
                                 gateway_server_uri: String::new(),
                                 discovery_profile_uri: String::new(),
-                                discovery_urls: OPCUADiscoveryUrls {
+                                discovery_urls: OPCUAStringArray {
                                     array_size: 0,
-                                    discovery_urls: vec![],
+                                    array_value: vec![],
                                 },
                             },
                             server_uri: String::from("http://vm-xp-steven/UA StackTest Server (AnsiC/2048)"),
@@ -1612,7 +1635,7 @@ mod tests {
                         security_request_id: 4,
                     }),
                     contents: OPCUAContents::MESSAGE(OPCUAMessage {
-                        type_id: OPCUAMessageTypeId {
+                        type_id: OPCUAExpandedNodeId {
                             encoding_mask: 0x01,
                             namespace_index: 0,
                             identifier_numeric: 467,
@@ -1626,7 +1649,11 @@ mod tests {
                                 audit_entry_id: String::new(),
                                 timeout_hint: 0,
                                 addition_header: OPCUAMessageAdditionalHeader {
-                                    type_id: 0x0000,
+                                    type_id: OPCUAExpandedNodeId {
+                                        encoding_mask: 0,
+                                        namespace_index: 0,
+                                        identifier_numeric: 0,
+                                    },
                                     encoding_mask: 0x00,
                                 },
                             },
@@ -1638,14 +1665,14 @@ mod tests {
                                 array_size: 0,
                                 signed_software_certificates: vec![],
                             },
-                            locale_ids: OPCUALocaleIds {
+                            locale_ids: OPCUAStringArray {
                                 array_size: 1,
-                                locale_ids: vec![
+                                array_value: vec![
                                     String::from("en-US"),
                                 ],
                             },
                             user_identity_token: OPCUAExtensionObject {
-                                type_id: OPCUAMessageTypeId {
+                                type_id: OPCUAExpandedNodeId {
                                     encoding_mask: 1,
                                     namespace_index: 0,
                                     identifier_numeric: 321,
@@ -1687,7 +1714,7 @@ mod tests {
                         security_request_id: 4,
                     }),
                     contents: OPCUAContents::MESSAGE(OPCUAMessage {
-                        type_id: OPCUAMessageTypeId {
+                        type_id: OPCUAExpandedNodeId {
                             encoding_mask: 0x01,
                             namespace_index: 0,
                             identifier_numeric: 470,
@@ -1700,7 +1727,11 @@ mod tests {
                                 service_diagnostics: 0x00,
                                 string_table: vec![0x00, 0x00, 0x00, 0x00],
                                 additional_header: OPCUAMessageAdditionalHeader {
-                                    type_id: 0x0000,
+                                    type_id: OPCUAExpandedNodeId {
+                                        encoding_mask: 0,
+                                        namespace_index: 0,
+                                        identifier_numeric: 0,
+                                    },
                                     encoding_mask: 0x00,
                                 },
                             },
