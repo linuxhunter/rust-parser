@@ -1,4 +1,4 @@
-use nom7::{IResult, sequence::tuple, bytes::complete::take, number::complete::{le_u8, le_u32, le_u16}, multi::{length_data, count}, combinator::rest};
+use nom7::{IResult, sequence::tuple, bytes::complete::take, number::complete::{le_u8, le_u32, le_u16}, multi::{length_data, count}};
 
 const OPCUA_MESSAGE_TYPE_LENGTH: usize = 3;
 
@@ -39,6 +39,15 @@ pub struct OPCUAMessageHeader {
 }
 
 #[derive(Debug, PartialEq)]
+pub struct OPCUAErrorHeader {
+    message_type: String,
+    chunk_type: u8,
+    message_size: u32,
+    error: u32,
+    reason: String,
+}
+
+#[derive(Debug, PartialEq)]
 pub struct OPCUAHelloMessage {
     endpoint_url: String,
 }
@@ -46,7 +55,7 @@ pub struct OPCUAHelloMessage {
 #[derive(Debug, PartialEq)]
 pub struct OPCUAExpandedNodeId {
     encoding_mask: u8,
-    namespace_index: u8,
+    namespace_index: u16,
     identifier_numeric: u32,
 }
 
@@ -83,6 +92,12 @@ pub struct OPCUAOpenMessageSecurityToken {
     token_id: u32,
     created_at: Vec<u8>,
     revised_lifetime: u32,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct OPCUAStringArray {
+    array_size: u32,
+    array_value: Vec<String>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -191,12 +206,6 @@ pub struct OPCUACreateSessionRequest {
 }
 
 #[derive(Debug, PartialEq)]
-pub struct OPCUACreateSessionResponse {
-    response_header: OPCUAMessageResponseHeader,
-    /* FIXME */
-}
-
-#[derive(Debug, PartialEq)]
 pub struct OPCUASignatureData {
     algorithm: String,
     signature: String,
@@ -214,9 +223,17 @@ pub struct OPCUASignatureSoftwareCertificates {
 }
 
 #[derive(Debug, PartialEq)]
-pub struct OPCUAStringArray {
-    array_size: u32,
-    array_value: Vec<String>,
+pub struct OPCUACreateSessionResponse {
+    response_header: OPCUAMessageResponseHeader,
+    session_id: OPCUAExpandedNodeId,
+    authentication_token: OPCUAExpandedNodeId,
+    revised_session_timeout: Vec<u8>,
+    server_nonce: Vec<u8>,
+    server_certificate: Vec<u8>,
+    server_endpoints: OPCUAEndpointsInfo,
+    server_software_certificates: OPCUASignatureSoftwareCertificates,
+    server_signature: OPCUASignatureData,
+    max_request_message_size: u32,
 }
 
 #[derive(Debug, PartialEq)]
@@ -288,6 +305,7 @@ pub enum OPCUAHeader {
     HELLO(OPCUAHelloHeader),
     OPEN(OPCUAOpenHeader),
     MESSAGE(OPCUAMessageHeader),
+    ERROR(OPCUAErrorHeader),
 }
 
 #[derive(Debug, PartialEq)]
@@ -302,15 +320,6 @@ pub enum OPCUAContents {
 pub struct OPCUA {
     header: OPCUAHeader,
     contents: OPCUAContents,
-}
-
-#[derive(Debug, PartialEq)]
-pub struct OPCUAErrorMessage {
-    message_type: String,
-    chunk_type: u8,
-    message_size: u32,
-    error: Vec<u8>,
-    reason: Vec<u8>,
 }
 
 pub fn parse_opcua_hello_header(input: &[u8]) -> IResult<&[u8], OPCUAHelloHeader> {
@@ -418,7 +427,7 @@ pub fn parse_opcua_message_header(input: &[u8]) -> IResult<&[u8], OPCUAMessageHe
     }))
 }
 
-pub fn parse_opcua_message_type_id(input: &[u8]) -> IResult<&[u8], OPCUAExpandedNodeId> {
+pub fn parse_opcua_message_expanded_node_id(input: &[u8]) -> IResult<&[u8], OPCUAExpandedNodeId> {
     let (rem, encoding_mask) = le_u8(input)?;
     match encoding_mask {
         0x00 => {
@@ -434,12 +443,12 @@ pub fn parse_opcua_message_type_id(input: &[u8]) -> IResult<&[u8], OPCUAExpanded
             let (rem, identifier_numeric) = le_u16(rem)?;
             Ok((rem, OPCUAExpandedNodeId {
                 encoding_mask,
-                namespace_index,
+                namespace_index: namespace_index as u16,
                 identifier_numeric: identifier_numeric as u32,
             }))
         },
         0x02 => {
-            let (rem, namespace_index) = le_u8(rem)?;
+            let (rem, namespace_index) = le_u16(rem)?;
             let (rem, identifier_numeric) = le_u32(rem)?;
             Ok((rem, OPCUAExpandedNodeId {
                 encoding_mask,
@@ -458,7 +467,7 @@ pub fn parse_opcua_message_additional_header(input: &[u8]) -> IResult<&[u8], OPC
         type_id,
         encoding_mask,
     )) = tuple((
-        parse_opcua_message_type_id,
+        parse_opcua_message_expanded_node_id,
         le_u8,
     ))(input)?;
     Ok((rem, OPCUAMessageAdditionalHeader {
@@ -604,7 +613,7 @@ pub fn parse_opcua_message_open_secure_channel_response(input: &[u8]) -> IResult
 }
 
 pub fn parse_opcua_open_message(input: &[u8]) -> IResult<&[u8], OPCUAMessage> {
-    let (rem, type_id) = parse_opcua_message_type_id(input)?;
+    let (rem, type_id) = parse_opcua_message_expanded_node_id(input)?;
     match type_id.identifier_numeric {
         446 => {
             let (rem, open_secure_channel_request) = parse_opcua_message_open_secure_channel_request(rem)?;
@@ -834,13 +843,38 @@ pub fn parse_opcua_msg_create_session_request(input: &[u8]) -> IResult<&[u8], OP
 pub fn parse_opcua_msg_create_session_response(input: &[u8]) -> IResult<&[u8], OPCUACreateSessionResponse> {
     let (rem, (
         response_header,
-        _,
+        session_id,
+        authentication_token,
+        revised_session_timeout,
+        server_nonce,
+        server_certificate,
+        server_endpoints,
+        server_software_certificates,
+        server_signature,
+        max_request_message_size,
     )) = tuple((
         parse_opcua_message_response_header,
-        rest,
+        parse_opcua_message_expanded_node_id,
+        parse_opcua_message_expanded_node_id,
+        take(8usize),
+        length_data(le_u32),
+        length_data(le_u32),
+        parse_opcua_msg_endpoints,
+        parse_opcua_message_signature_software_certificates,
+        parse_opcua_message_signature_data,
+        le_u32,
     ))(input)?;
     Ok((rem, OPCUACreateSessionResponse {
         response_header,
+        session_id,
+        authentication_token,
+        revised_session_timeout: revised_session_timeout.to_vec(),
+        server_nonce: server_nonce.to_vec(),
+        server_certificate: server_certificate.to_vec(),
+        server_endpoints,
+        server_software_certificates,
+        server_signature,
+        max_request_message_size,
     }))
 }
 
@@ -870,6 +904,7 @@ pub fn parse_opcua_message_locale_id(input: &[u8]) -> IResult<&[u8], String> {
     let (rem, locale_id) = length_data(le_u32)(input)?;
     Ok((rem, String::from_utf8(locale_id.to_vec()).unwrap()))
 }
+
 pub fn parse_opcua_string_array(input: &[u8]) -> IResult<&[u8], OPCUAStringArray> {
     let (rem, array_size) = le_u32(input)?;
     let (rem, array_value) = count(parse_opcua_message_locale_id, array_size as usize)(rem)?;
@@ -893,7 +928,7 @@ pub fn parse_opcua_message_extension_object(input: &[u8]) -> IResult<&[u8], OPCU
         encoding_mask,
         anonymous_identity_token,
     )) = tuple((
-        parse_opcua_message_type_id,
+        parse_opcua_message_expanded_node_id,
         le_u8,
         parse_opcua_message_anonymous_identity_token,
     ))(input)?;
@@ -905,22 +940,21 @@ pub fn parse_opcua_message_extension_object(input: &[u8]) -> IResult<&[u8], OPCU
 }
 
 pub fn parse_opcua_msg_activate_session_request(input: &[u8]) -> IResult<&[u8], OPCUAActivateSessionRequest> {
-    let (rem, request_header) = parse_opcua_message_request_header(input)?;
     let (rem, (
-        //request_header,
+        request_header,
         client_signature,
         client_software_certificates,
         locale_ids,
         user_identity_token,
         user_token_signature,
     )) = tuple((
-        //parse_opcua_message_request_header,
+        parse_opcua_message_request_header,
         parse_opcua_message_signature_data,
         parse_opcua_message_signature_software_certificates,
         parse_opcua_string_array,
         parse_opcua_message_extension_object,
         parse_opcua_message_signature_data,
-    ))(rem)?;
+    ))(input)?;
     Ok((rem, OPCUAActivateSessionRequest {
         request_header,
         client_signature,
@@ -970,7 +1004,7 @@ pub fn parse_opcua_msg_activate_session_response(input: &[u8]) -> IResult<&[u8],
 }
 
 pub fn parse_opcua_msg_message(input: &[u8]) -> IResult<&[u8], OPCUAMessage> {
-    let (rem, type_id) = parse_opcua_message_type_id(input)?;
+    let (rem, type_id) = parse_opcua_message_expanded_node_id(input)?;
     match type_id.identifier_numeric {
         428 => {
             let (rem, get_endpoint_request) = parse_opcua_msg_get_endpoint_request(rem)?;
@@ -1020,6 +1054,29 @@ pub fn parse_opcua_msg_message(input: &[u8]) -> IResult<&[u8], OPCUAMessage> {
     }
 }
 
+pub fn parse_opcua_error_header(input: &[u8]) -> IResult<&[u8], OPCUAErrorHeader> {
+    let (rem, (
+        message_type,
+        chunk_type,
+        message_size,
+        error,
+        reason,
+    )) = tuple((
+        take(OPCUA_MESSAGE_TYPE_LENGTH),
+        le_u8,
+        le_u32,
+        le_u32,
+        parse_opcua_null_string,
+    ))(input)?;
+    Ok((rem, OPCUAErrorHeader {
+        message_type: String::from_utf8(message_type.to_vec()).unwrap(),
+        chunk_type,
+        message_size,
+        error,
+        reason,
+    }))
+}
+
 pub fn parse_opcua(input: &[u8]) -> IResult<&[u8], OPCUA> {
     let (_, message_type) = take(OPCUA_MESSAGE_TYPE_LENGTH)(input)?;
     let message_type = String::from_utf8(message_type.to_vec()).unwrap();
@@ -1053,6 +1110,13 @@ pub fn parse_opcua(input: &[u8]) -> IResult<&[u8], OPCUA> {
             Ok((rem, OPCUA {
                 header: OPCUAHeader::MESSAGE(header),
                 contents: OPCUAContents::MESSAGE(message),
+            }))
+        },
+        "ERR" => {
+            let (rem, header) = parse_opcua_error_header(input)?;
+            Ok((rem, OPCUA {
+                header: OPCUAHeader::ERROR(header),
+                contents: OPCUAContents::NONE,
             }))
         },
         _ => {
@@ -1746,6 +1810,291 @@ mod tests {
                             },
                         }),
                     }),
+                });
+            },
+            Err(_) => {
+                panic!("should not reach here");
+            }
+        }
+    }
+
+    #[test]
+    fn test_parse_opcua_create_session_response() {
+        let pcap = include_bytes!("pcaps/opcua/opcua_message_create_session_response.bin");
+        let payload = &pcap[..];
+        match parse_opcua(payload) {
+            Ok((rem, opc_ua)) => {
+                assert_eq!(rem.len(), 0);
+                assert_eq!(opc_ua, OPCUA {
+                    header: OPCUAHeader::MESSAGE(OPCUAMessageHeader {
+                        message_type: String::from("MSG"),
+                        chunk_type: b'F',
+                        message_size: 8086,
+                        security_channel_id: 6495,
+                        security_token_id: 1,
+                        security_sequence_number: 53,
+                        security_request_id: 3,
+                    }),
+                    contents: OPCUAContents::MESSAGE(OPCUAMessage {
+                        type_id: OPCUAExpandedNodeId {
+                            encoding_mask: 0x01,
+                            namespace_index: 0,
+                            identifier_numeric: 464,
+                        },
+                        message: OPCUASpecificMessage::CREATE_SESSION_RESPONSE(OPCUACreateSessionResponse {
+                            response_header: OPCUAMessageResponseHeader {
+                                timestamp: vec![0x87, 0x83, 0xaf, 0x57, 0x5c, 0x2b, 0xca, 0x01],
+                                request_handle: 1,
+                                service_result: 0x00000000,
+                                service_diagnostics: 0,
+                                string_table: vec![0x00, 0x00, 0x00, 0x00],
+                                additional_header: OPCUAMessageAdditionalHeader {
+                                    type_id: OPCUAExpandedNodeId {
+                                        encoding_mask: 0x00,
+                                        namespace_index: 0,
+                                        identifier_numeric: 0,
+                                    },
+                                    encoding_mask: 0x00,
+                                },
+                            },
+                            session_id: OPCUAExpandedNodeId {
+                                encoding_mask: 0x02,
+                                namespace_index: 10,
+                                identifier_numeric: 365457,
+                            },
+                            authentication_token: OPCUAExpandedNodeId {
+                                encoding_mask: 0x01,
+                                namespace_index: 0,
+                                identifier_numeric: 6527,
+                            },
+                            revised_session_timeout: vec![0x00, 0x00, 0x00, 0x00, 0x00, 0x4c, 0xed, 0x40],
+                            server_nonce: vec![193, 173, 147, 16, 117, 10, 42, 196, 204, 6, 64, 233, 98, 108, 15, 29, 146, 35, 226, 211, 22, 63, 193, 109, 74, 83, 133, 114, 1, 151, 53, 132],
+                            server_certificate: vec![48, 130, 3, 231, 48, 130, 2, 211, 160, 3, 2, 1, 2, 2, 16, 7, 51, 173, 50, 89, 170, 156, 131, 75, 107, 220, 132, 126, 188, 151, 86, 48, 9, 6, 5, 43, 14, 3, 2, 29, 5, 0, 48, 73, 49, 28, 48, 26, 6, 10, 9, 146, 38, 137, 147, 242, 44, 100, 1, 25, 22, 12, 118, 109, 45, 120, 112, 45, 115, 116, 101, 118, 101, 110, 49, 41, 48, 39, 6, 3, 85, 4, 3, 19, 32, 85, 65, 32, 83, 116, 97, 99, 107, 84, 101, 115, 116, 32, 83, 101, 114, 118, 101, 114, 32, 40, 65, 110, 115, 105, 67, 47, 50, 48, 52, 56, 41, 48, 30, 23, 13, 48, 57, 48, 56, 49, 55, 49, 56, 49, 54, 51, 54, 90, 23, 13, 49, 57, 48, 56, 49, 55, 49, 56, 49, 54, 51, 54, 90, 48, 73, 49, 28, 48, 26, 6, 10, 9, 146, 38, 137, 147, 242, 44, 100, 1, 25, 22, 12, 118, 109, 45, 120, 112, 45, 115, 116, 101, 118, 101, 110, 49, 41, 48, 39, 6, 3, 85, 4, 3, 19, 32, 85, 65, 32, 83, 116, 97, 99, 107, 84, 101, 115, 116, 32, 83, 101, 114, 118, 101, 114, 32, 40, 65, 110, 115, 105, 67, 47, 50, 48, 52, 56, 41, 48, 130, 1, 34, 48, 13, 6, 9, 42, 134, 72, 134, 247, 13, 1, 1, 1, 5, 0, 3, 130, 1, 15, 0, 48, 130, 1, 10, 2, 130, 1, 1, 0, 140, 89, 34, 103, 103, 72, 248, 223, 251, 101, 49, 91, 103, 141, 158, 215, 122, 211, 115, 34, 0, 58, 107, 193, 183, 167, 121, 252, 121, 41, 140, 204, 211, 245, 42, 206, 185, 200, 139, 181, 213, 179, 159, 60, 228, 121, 193, 167, 133, 45, 78, 75, 28, 8, 46, 160, 90, 134, 48, 7, 145, 77, 6, 72, 180, 30, 20, 158, 107, 163, 178, 207, 61, 128, 90, 158, 185, 122, 192, 107, 125, 48, 5, 170, 182, 77, 206, 62, 78, 210, 39, 242, 97, 91, 44, 198, 132, 251, 242, 140, 73, 208, 126, 80, 135, 130, 31, 235, 176, 114, 42, 229, 163, 112, 240, 65, 248, 222, 61, 124, 57, 93, 192, 237, 5, 194, 210, 155, 106, 84, 111, 215, 149, 197, 20, 193, 214, 126, 9, 53, 214, 206, 74, 64, 49, 11, 35, 223, 44, 177, 224, 50, 192, 160, 200, 203, 179, 76, 4, 136, 32, 185, 140, 102, 27, 147, 246, 58, 5, 219, 88, 48, 117, 59, 29, 130, 17, 56, 47, 203, 93, 107, 136, 180, 64, 160, 60, 156, 131, 68, 62, 251, 19, 125, 193, 216, 67, 54, 250, 213, 91, 216, 118, 19, 153, 95, 46, 72, 138, 128, 120, 111, 127, 110, 82, 105, 164, 39, 47, 119, 149, 235, 146, 114, 191, 214, 239, 96, 233, 149, 45, 200, 188, 122, 10, 113, 69, 133, 239, 133, 82, 37, 39, 90, 39, 142, 62, 104, 178, 218, 242, 166, 159, 112, 223, 229, 2, 3, 1, 0, 1, 163, 129, 210, 48, 129, 207, 48, 29, 6, 3, 85, 29, 14, 4, 22, 4, 20, 50, 79, 86, 230, 52, 208, 176, 1, 227, 144, 210, 213, 5, 87, 153, 241, 173, 36, 21, 60, 48, 31, 6, 3, 85, 29, 1, 4, 24, 48, 22, 128, 20, 50, 79, 86, 230, 52, 208, 176, 1, 227, 144, 210, 213, 5, 87, 153, 241, 173, 36, 21, 60, 48, 12, 6, 3, 85, 29, 19, 1, 1, 255, 4, 2, 48, 0, 48, 14, 6, 3, 85, 29, 15, 1, 1, 255, 4, 4, 3, 2, 2, 244, 48, 32, 6, 3, 85, 29, 37, 1, 1, 255, 4, 22, 48, 20, 6, 8, 43, 6, 1, 5, 5, 7, 3, 1, 6, 8, 43, 6, 1, 5, 5, 7, 3, 2, 48, 77, 6, 3, 85, 29, 7, 4, 70, 48, 68, 134, 52, 104, 116, 116, 112, 58, 47, 47, 118, 109, 45, 120, 112, 45, 115, 116, 101, 118, 101, 110, 47, 85, 65, 32, 83, 116, 97, 99, 107, 84, 101, 115, 116, 32, 83, 101, 114, 118, 101, 114, 32, 40, 65, 110, 115, 105, 67, 47, 50, 48, 52, 56, 41, 130, 12, 118, 109, 45, 120, 112, 45, 115, 116, 101, 118, 101, 110, 48, 9, 6, 5, 43, 14, 3, 2, 29, 5, 0, 3, 130, 1, 1, 0, 28, 144, 243, 244, 135, 216, 10, 180, 190, 246, 50, 151, 113, 122, 20, 153, 138, 185, 161, 115, 98, 253, 148, 11, 135, 161, 186, 127, 30, 199, 238, 185, 120, 120, 135, 31, 104, 9, 152, 82, 231, 87, 247, 86, 68, 229, 174, 209, 103, 14, 122, 37, 242, 250, 14, 240, 254, 64, 59, 30, 107, 130, 181, 221, 82, 156, 142, 190, 169, 195, 203, 148, 120, 35, 112, 100, 195, 223, 91, 161, 123, 249, 136, 207, 125, 112, 142, 100, 26, 244, 127, 10, 179, 42, 79, 237, 152, 168, 132, 37, 226, 161, 71, 100, 124, 248, 143, 37, 166, 96, 106, 195, 6, 147, 245, 129, 201, 57, 101, 188, 64, 100, 227, 145, 178, 234, 213, 223, 120, 134, 158, 140, 232, 147, 66, 71, 165, 190, 187, 79, 132, 200, 243, 187, 147, 195, 252, 7, 129, 18, 138, 252, 10, 219, 9, 21, 55, 82, 26, 211, 6, 215, 23, 235, 177, 25, 18, 122, 101, 26, 200, 54, 17, 195, 127, 105, 6, 175, 205, 223, 143, 10, 115, 231, 217, 115, 254, 211, 151, 83, 167, 116, 34, 33, 178, 11, 176, 19, 203, 194, 118, 252, 63, 160, 188, 83, 149, 108, 93, 65, 171, 97, 63, 38, 175, 60, 214, 157, 168, 210, 243, 10, 137, 211, 196, 46, 73, 175, 100, 199, 84, 22, 138, 164, 253, 189, 119, 66, 206, 160, 193, 191, 197, 64, 46, 181, 209, 33, 19, 16, 217, 151, 78, 255, 111, 74],
+                            server_endpoints: OPCUAEndpointsInfo {
+                                array_size: 5,
+                                endpoints: vec![
+                                    OPCUAEndpointDescription {
+                                        endpoint_url: String::from("opc.tcp://vm-xp-steven:12001/StackTestServer/AnsiC/2048"),
+                                        server: OPCUAApplicationDescription {
+                                            application_uri: String::from("http://vm-xp-steven/UA StackTest Server (AnsiC/2048)"),
+                                            product_uri: String::new(),
+                                            application_name: OPCUALocalizedText {
+                                                encoding_mask: 0x02,
+                                                text: String::from("UA StackTest Server (AnsiC/2048)"),
+                                            },
+                                            application_type: 0,
+                                            gateway_server_uri: String::new(),
+                                            discovery_profile_uri: String::new(),
+                                            discovery_urls: OPCUAStringArray {
+                                                array_size: 1,
+                                                array_value: vec![
+                                                    String::from("opc.tcp://vm-xp-steven:12001/StackTestServer/AnsiC/2048"),
+                                                ],
+                                            },
+                                        },
+                                        server_certificate: vec![48, 130, 3, 231, 48, 130, 2, 211, 160, 3, 2, 1, 2, 2, 16, 7, 51, 173, 50, 89, 170, 156, 131, 75, 107, 220, 132, 126, 188, 151, 86, 48, 9, 6, 5, 43, 14, 3, 2, 29, 5, 0, 48, 73, 49, 28, 48, 26, 6, 10, 9, 146, 38, 137, 147, 242, 44, 100, 1, 25, 22, 12, 118, 109, 45, 120, 112, 45, 115, 116, 101, 118, 101, 110, 49, 41, 48, 39, 6, 3, 85, 4, 3, 19, 32, 85, 65, 32, 83, 116, 97, 99, 107, 84, 101, 115, 116, 32, 83, 101, 114, 118, 101, 114, 32, 40, 65, 110, 115, 105, 67, 47, 50, 48, 52, 56, 41, 48, 30, 23, 13, 48, 57, 48, 56, 49, 55, 49, 56, 49, 54, 51, 54, 90, 23, 13, 49, 57, 48, 56, 49, 55, 49, 56, 49, 54, 51, 54, 90, 48, 73, 49, 28, 48, 26, 6, 10, 9, 146, 38, 137, 147, 242, 44, 100, 1, 25, 22, 12, 118, 109, 45, 120, 112, 45, 115, 116, 101, 118, 101, 110, 49, 41, 48, 39, 6, 3, 85, 4, 3, 19, 32, 85, 65, 32, 83, 116, 97, 99, 107, 84, 101, 115, 116, 32, 83, 101, 114, 118, 101, 114, 32, 40, 65, 110, 115, 105, 67, 47, 50, 48, 52, 56, 41, 48, 130, 1, 34, 48, 13, 6, 9, 42, 134, 72, 134, 247, 13, 1, 1, 1, 5, 0, 3, 130, 1, 15, 0, 48, 130, 1, 10, 2, 130, 1, 1, 0, 140, 89, 34, 103, 103, 72, 248, 223, 251, 101, 49, 91, 103, 141, 158, 215, 122, 211, 115, 34, 0, 58, 107, 193, 183, 167, 121, 252, 121, 41, 140, 204, 211, 245, 42, 206, 185, 200, 139, 181, 213, 179, 159, 60, 228, 121, 193, 167, 133, 45, 78, 75, 28, 8, 46, 160, 90, 134, 48, 7, 145, 77, 6, 72, 180, 30, 20, 158, 107, 163, 178, 207, 61, 128, 90, 158, 185, 122, 192, 107, 125, 48, 5, 170, 182, 77, 206, 62, 78, 210, 39, 242, 97, 91, 44, 198, 132, 251, 242, 140, 73, 208, 126, 80, 135, 130, 31, 235, 176, 114, 42, 229, 163, 112, 240, 65, 248, 222, 61, 124, 57, 93, 192, 237, 5, 194, 210, 155, 106, 84, 111, 215, 149, 197, 20, 193, 214, 126, 9, 53, 214, 206, 74, 64, 49, 11, 35, 223, 44, 177, 224, 50, 192, 160, 200, 203, 179, 76, 4, 136, 32, 185, 140, 102, 27, 147, 246, 58, 5, 219, 88, 48, 117, 59, 29, 130, 17, 56, 47, 203, 93, 107, 136, 180, 64, 160, 60, 156, 131, 68, 62, 251, 19, 125, 193, 216, 67, 54, 250, 213, 91, 216, 118, 19, 153, 95, 46, 72, 138, 128, 120, 111, 127, 110, 82, 105, 164, 39, 47, 119, 149, 235, 146, 114, 191, 214, 239, 96, 233, 149, 45, 200, 188, 122, 10, 113, 69, 133, 239, 133, 82, 37, 39, 90, 39, 142, 62, 104, 178, 218, 242, 166, 159, 112, 223, 229, 2, 3, 1, 0, 1, 163, 129, 210, 48, 129, 207, 48, 29, 6, 3, 85, 29, 14, 4, 22, 4, 20, 50, 79, 86, 230, 52, 208, 176, 1, 227, 144, 210, 213, 5, 87, 153, 241, 173, 36, 21, 60, 48, 31, 6, 3, 85, 29, 1, 4, 24, 48, 22, 128, 20, 50, 79, 86, 230, 52, 208, 176, 1, 227, 144, 210, 213, 5, 87, 153, 241, 173, 36, 21, 60, 48, 12, 6, 3, 85, 29, 19, 1, 1, 255, 4, 2, 48, 0, 48, 14, 6, 3, 85, 29, 15, 1, 1, 255, 4, 4, 3, 2, 2, 244, 48, 32, 6, 3, 85, 29, 37, 1, 1, 255, 4, 22, 48, 20, 6, 8, 43, 6, 1, 5, 5, 7, 3, 1, 6, 8, 43, 6, 1, 5, 5, 7, 3, 2, 48, 77, 6, 3, 85, 29, 7, 4, 70, 48, 68, 134, 52, 104, 116, 116, 112, 58, 47, 47, 118, 109, 45, 120, 112, 45, 115, 116, 101, 118, 101, 110, 47, 85, 65, 32, 83, 116, 97, 99, 107, 84, 101, 115, 116, 32, 83, 101, 114, 118, 101, 114, 32, 40, 65, 110, 115, 105, 67, 47, 50, 48, 52, 56, 41, 130, 12, 118, 109, 45, 120, 112, 45, 115, 116, 101, 118, 101, 110, 48, 9, 6, 5, 43, 14, 3, 2, 29, 5, 0, 3, 130, 1, 1, 0, 28, 144, 243, 244, 135, 216, 10, 180, 190, 246, 50, 151, 113, 122, 20, 153, 138, 185, 161, 115, 98, 253, 148, 11, 135, 161, 186, 127, 30, 199, 238, 185, 120, 120, 135, 31, 104, 9, 152, 82, 231, 87, 247, 86, 68, 229, 174, 209, 103, 14, 122, 37, 242, 250, 14, 240, 254, 64, 59, 30, 107, 130, 181, 221, 82, 156, 142, 190, 169, 195, 203, 148, 120, 35, 112, 100, 195, 223, 91, 161, 123, 249, 136, 207, 125, 112, 142, 100, 26, 244, 127, 10, 179, 42, 79, 237, 152, 168, 132, 37, 226, 161, 71, 100, 124, 248, 143, 37, 166, 96, 106, 195, 6, 147, 245, 129, 201, 57, 101, 188, 64, 100, 227, 145, 178, 234, 213, 223, 120, 134, 158, 140, 232, 147, 66, 71, 165, 190, 187, 79, 132, 200, 243, 187, 147, 195, 252, 7, 129, 18, 138, 252, 10, 219, 9, 21, 55, 82, 26, 211, 6, 215, 23, 235, 177, 25, 18, 122, 101, 26, 200, 54, 17, 195, 127, 105, 6, 175, 205, 223, 143, 10, 115, 231, 217, 115, 254, 211, 151, 83, 167, 116, 34, 33, 178, 11, 176, 19, 203, 194, 118, 252, 63, 160, 188, 83, 149, 108, 93, 65, 171, 97, 63, 38, 175, 60, 214, 157, 168, 210, 243, 10, 137, 211, 196, 46, 73, 175, 100, 199, 84, 22, 138, 164, 253, 189, 119, 66, 206, 160, 193, 191, 197, 64, 46, 181, 209, 33, 19, 16, 217, 151, 78, 255, 111, 74],
+                                        message_security_mode: 0x00000001,
+                                        security_policy_uri: String::from("http://opcfoundation.org/UA/SecurityPolicy#None"),
+                                        user_identity_tokens: OPCUAUserTokenPolicies {
+                                            array_size: 1,
+                                            user_token_policies: vec![
+                                                OPCUAUserTokenPolicy {
+                                                    policy_id: b'0',
+                                                    user_token_type: 0x00000000,
+                                                    issued_token_type: String::new(),
+                                                    issuer_endpoint_url: String::new(),
+                                                    security_policy_uri: String::from("http://opcfoundation.org/UA/SecurityPolicy#Basic256"),
+                                                },
+                                            ],
+                                        },
+                                        transport_profile_uri: String::from("http://opcfoundation.org/UA/profiles/transport/uatcp"),
+                                        security_level: 0,
+                                    },
+                                    OPCUAEndpointDescription {
+                                        endpoint_url: String::from("opc.tcp://vm-xp-steven:12001/StackTestServer/AnsiC/2048"),
+                                        server: OPCUAApplicationDescription {
+                                            application_uri: String::from("http://vm-xp-steven/UA StackTest Server (AnsiC/2048)"),
+                                            product_uri: String::new(),
+                                            application_name: OPCUALocalizedText {
+                                                encoding_mask: 0x02,
+                                                text: String::from("UA StackTest Server (AnsiC/2048)"),
+                                            },
+                                            application_type: 0,
+                                            gateway_server_uri: String::new(),
+                                            discovery_profile_uri: String::new(),
+                                            discovery_urls: OPCUAStringArray {
+                                                array_size: 1,
+                                                array_value: vec![
+                                                    String::from("opc.tcp://vm-xp-steven:12001/StackTestServer/AnsiC/2048"),
+                                                ],
+                                            },
+                                        },
+                                        server_certificate: vec![48, 130, 3, 231, 48, 130, 2, 211, 160, 3, 2, 1, 2, 2, 16, 7, 51, 173, 50, 89, 170, 156, 131, 75, 107, 220, 132, 126, 188, 151, 86, 48, 9, 6, 5, 43, 14, 3, 2, 29, 5, 0, 48, 73, 49, 28, 48, 26, 6, 10, 9, 146, 38, 137, 147, 242, 44, 100, 1, 25, 22, 12, 118, 109, 45, 120, 112, 45, 115, 116, 101, 118, 101, 110, 49, 41, 48, 39, 6, 3, 85, 4, 3, 19, 32, 85, 65, 32, 83, 116, 97, 99, 107, 84, 101, 115, 116, 32, 83, 101, 114, 118, 101, 114, 32, 40, 65, 110, 115, 105, 67, 47, 50, 48, 52, 56, 41, 48, 30, 23, 13, 48, 57, 48, 56, 49, 55, 49, 56, 49, 54, 51, 54, 90, 23, 13, 49, 57, 48, 56, 49, 55, 49, 56, 49, 54, 51, 54, 90, 48, 73, 49, 28, 48, 26, 6, 10, 9, 146, 38, 137, 147, 242, 44, 100, 1, 25, 22, 12, 118, 109, 45, 120, 112, 45, 115, 116, 101, 118, 101, 110, 49, 41, 48, 39, 6, 3, 85, 4, 3, 19, 32, 85, 65, 32, 83, 116, 97, 99, 107, 84, 101, 115, 116, 32, 83, 101, 114, 118, 101, 114, 32, 40, 65, 110, 115, 105, 67, 47, 50, 48, 52, 56, 41, 48, 130, 1, 34, 48, 13, 6, 9, 42, 134, 72, 134, 247, 13, 1, 1, 1, 5, 0, 3, 130, 1, 15, 0, 48, 130, 1, 10, 2, 130, 1, 1, 0, 140, 89, 34, 103, 103, 72, 248, 223, 251, 101, 49, 91, 103, 141, 158, 215, 122, 211, 115, 34, 0, 58, 107, 193, 183, 167, 121, 252, 121, 41, 140, 204, 211, 245, 42, 206, 185, 200, 139, 181, 213, 179, 159, 60, 228, 121, 193, 167, 133, 45, 78, 75, 28, 8, 46, 160, 90, 134, 48, 7, 145, 77, 6, 72, 180, 30, 20, 158, 107, 163, 178, 207, 61, 128, 90, 158, 185, 122, 192, 107, 125, 48, 5, 170, 182, 77, 206, 62, 78, 210, 39, 242, 97, 91, 44, 198, 132, 251, 242, 140, 73, 208, 126, 80, 135, 130, 31, 235, 176, 114, 42, 229, 163, 112, 240, 65, 248, 222, 61, 124, 57, 93, 192, 237, 5, 194, 210, 155, 106, 84, 111, 215, 149, 197, 20, 193, 214, 126, 9, 53, 214, 206, 74, 64, 49, 11, 35, 223, 44, 177, 224, 50, 192, 160, 200, 203, 179, 76, 4, 136, 32, 185, 140, 102, 27, 147, 246, 58, 5, 219, 88, 48, 117, 59, 29, 130, 17, 56, 47, 203, 93, 107, 136, 180, 64, 160, 60, 156, 131, 68, 62, 251, 19, 125, 193, 216, 67, 54, 250, 213, 91, 216, 118, 19, 153, 95, 46, 72, 138, 128, 120, 111, 127, 110, 82, 105, 164, 39, 47, 119, 149, 235, 146, 114, 191, 214, 239, 96, 233, 149, 45, 200, 188, 122, 10, 113, 69, 133, 239, 133, 82, 37, 39, 90, 39, 142, 62, 104, 178, 218, 242, 166, 159, 112, 223, 229, 2, 3, 1, 0, 1, 163, 129, 210, 48, 129, 207, 48, 29, 6, 3, 85, 29, 14, 4, 22, 4, 20, 50, 79, 86, 230, 52, 208, 176, 1, 227, 144, 210, 213, 5, 87, 153, 241, 173, 36, 21, 60, 48, 31, 6, 3, 85, 29, 1, 4, 24, 48, 22, 128, 20, 50, 79, 86, 230, 52, 208, 176, 1, 227, 144, 210, 213, 5, 87, 153, 241, 173, 36, 21, 60, 48, 12, 6, 3, 85, 29, 19, 1, 1, 255, 4, 2, 48, 0, 48, 14, 6, 3, 85, 29, 15, 1, 1, 255, 4, 4, 3, 2, 2, 244, 48, 32, 6, 3, 85, 29, 37, 1, 1, 255, 4, 22, 48, 20, 6, 8, 43, 6, 1, 5, 5, 7, 3, 1, 6, 8, 43, 6, 1, 5, 5, 7, 3, 2, 48, 77, 6, 3, 85, 29, 7, 4, 70, 48, 68, 134, 52, 104, 116, 116, 112, 58, 47, 47, 118, 109, 45, 120, 112, 45, 115, 116, 101, 118, 101, 110, 47, 85, 65, 32, 83, 116, 97, 99, 107, 84, 101, 115, 116, 32, 83, 101, 114, 118, 101, 114, 32, 40, 65, 110, 115, 105, 67, 47, 50, 48, 52, 56, 41, 130, 12, 118, 109, 45, 120, 112, 45, 115, 116, 101, 118, 101, 110, 48, 9, 6, 5, 43, 14, 3, 2, 29, 5, 0, 3, 130, 1, 1, 0, 28, 144, 243, 244, 135, 216, 10, 180, 190, 246, 50, 151, 113, 122, 20, 153, 138, 185, 161, 115, 98, 253, 148, 11, 135, 161, 186, 127, 30, 199, 238, 185, 120, 120, 135, 31, 104, 9, 152, 82, 231, 87, 247, 86, 68, 229, 174, 209, 103, 14, 122, 37, 242, 250, 14, 240, 254, 64, 59, 30, 107, 130, 181, 221, 82, 156, 142, 190, 169, 195, 203, 148, 120, 35, 112, 100, 195, 223, 91, 161, 123, 249, 136, 207, 125, 112, 142, 100, 26, 244, 127, 10, 179, 42, 79, 237, 152, 168, 132, 37, 226, 161, 71, 100, 124, 248, 143, 37, 166, 96, 106, 195, 6, 147, 245, 129, 201, 57, 101, 188, 64, 100, 227, 145, 178, 234, 213, 223, 120, 134, 158, 140, 232, 147, 66, 71, 165, 190, 187, 79, 132, 200, 243, 187, 147, 195, 252, 7, 129, 18, 138, 252, 10, 219, 9, 21, 55, 82, 26, 211, 6, 215, 23, 235, 177, 25, 18, 122, 101, 26, 200, 54, 17, 195, 127, 105, 6, 175, 205, 223, 143, 10, 115, 231, 217, 115, 254, 211, 151, 83, 167, 116, 34, 33, 178, 11, 176, 19, 203, 194, 118, 252, 63, 160, 188, 83, 149, 108, 93, 65, 171, 97, 63, 38, 175, 60, 214, 157, 168, 210, 243, 10, 137, 211, 196, 46, 73, 175, 100, 199, 84, 22, 138, 164, 253, 189, 119, 66, 206, 160, 193, 191, 197, 64, 46, 181, 209, 33, 19, 16, 217, 151, 78, 255, 111, 74],
+                                        message_security_mode: 0x00000003,
+                                        security_policy_uri: String::from("http://opcfoundation.org/UA/SecurityPolicy#Basic128Rsa15"),
+                                        user_identity_tokens: OPCUAUserTokenPolicies {
+                                            array_size: 1,
+                                            user_token_policies: vec![
+                                                OPCUAUserTokenPolicy {
+                                                    policy_id: b'0',
+                                                    user_token_type: 0x00000000,
+                                                    issued_token_type: String::new(),
+                                                    issuer_endpoint_url: String::new(),
+                                                    security_policy_uri: String::new(),
+                                                },
+                                            ],
+                                        },
+                                        transport_profile_uri: String::from("http://opcfoundation.org/UA/profiles/transport/uatcp"),
+                                        security_level: 0,
+                                    },
+                                    OPCUAEndpointDescription {
+                                        endpoint_url: String::from("opc.tcp://vm-xp-steven:12001/StackTestServer/AnsiC/2048"),
+                                        server: OPCUAApplicationDescription {
+                                            application_uri: String::from("http://vm-xp-steven/UA StackTest Server (AnsiC/2048)"),
+                                            product_uri: String::new(),
+                                            application_name: OPCUALocalizedText {
+                                                encoding_mask: 0x02,
+                                                text: String::from("UA StackTest Server (AnsiC/2048)"),
+                                            },
+                                            application_type: 0,
+                                            gateway_server_uri: String::new(),
+                                            discovery_profile_uri: String::new(),
+                                            discovery_urls: OPCUAStringArray {
+                                                array_size: 1,
+                                                array_value: vec![
+                                                    String::from("opc.tcp://vm-xp-steven:12001/StackTestServer/AnsiC/2048"),
+                                                ],
+                                            },
+                                        },
+                                        server_certificate: vec![48, 130, 3, 231, 48, 130, 2, 211, 160, 3, 2, 1, 2, 2, 16, 7, 51, 173, 50, 89, 170, 156, 131, 75, 107, 220, 132, 126, 188, 151, 86, 48, 9, 6, 5, 43, 14, 3, 2, 29, 5, 0, 48, 73, 49, 28, 48, 26, 6, 10, 9, 146, 38, 137, 147, 242, 44, 100, 1, 25, 22, 12, 118, 109, 45, 120, 112, 45, 115, 116, 101, 118, 101, 110, 49, 41, 48, 39, 6, 3, 85, 4, 3, 19, 32, 85, 65, 32, 83, 116, 97, 99, 107, 84, 101, 115, 116, 32, 83, 101, 114, 118, 101, 114, 32, 40, 65, 110, 115, 105, 67, 47, 50, 48, 52, 56, 41, 48, 30, 23, 13, 48, 57, 48, 56, 49, 55, 49, 56, 49, 54, 51, 54, 90, 23, 13, 49, 57, 48, 56, 49, 55, 49, 56, 49, 54, 51, 54, 90, 48, 73, 49, 28, 48, 26, 6, 10, 9, 146, 38, 137, 147, 242, 44, 100, 1, 25, 22, 12, 118, 109, 45, 120, 112, 45, 115, 116, 101, 118, 101, 110, 49, 41, 48, 39, 6, 3, 85, 4, 3, 19, 32, 85, 65, 32, 83, 116, 97, 99, 107, 84, 101, 115, 116, 32, 83, 101, 114, 118, 101, 114, 32, 40, 65, 110, 115, 105, 67, 47, 50, 48, 52, 56, 41, 48, 130, 1, 34, 48, 13, 6, 9, 42, 134, 72, 134, 247, 13, 1, 1, 1, 5, 0, 3, 130, 1, 15, 0, 48, 130, 1, 10, 2, 130, 1, 1, 0, 140, 89, 34, 103, 103, 72, 248, 223, 251, 101, 49, 91, 103, 141, 158, 215, 122, 211, 115, 34, 0, 58, 107, 193, 183, 167, 121, 252, 121, 41, 140, 204, 211, 245, 42, 206, 185, 200, 139, 181, 213, 179, 159, 60, 228, 121, 193, 167, 133, 45, 78, 75, 28, 8, 46, 160, 90, 134, 48, 7, 145, 77, 6, 72, 180, 30, 20, 158, 107, 163, 178, 207, 61, 128, 90, 158, 185, 122, 192, 107, 125, 48, 5, 170, 182, 77, 206, 62, 78, 210, 39, 242, 97, 91, 44, 198, 132, 251, 242, 140, 73, 208, 126, 80, 135, 130, 31, 235, 176, 114, 42, 229, 163, 112, 240, 65, 248, 222, 61, 124, 57, 93, 192, 237, 5, 194, 210, 155, 106, 84, 111, 215, 149, 197, 20, 193, 214, 126, 9, 53, 214, 206, 74, 64, 49, 11, 35, 223, 44, 177, 224, 50, 192, 160, 200, 203, 179, 76, 4, 136, 32, 185, 140, 102, 27, 147, 246, 58, 5, 219, 88, 48, 117, 59, 29, 130, 17, 56, 47, 203, 93, 107, 136, 180, 64, 160, 60, 156, 131, 68, 62, 251, 19, 125, 193, 216, 67, 54, 250, 213, 91, 216, 118, 19, 153, 95, 46, 72, 138, 128, 120, 111, 127, 110, 82, 105, 164, 39, 47, 119, 149, 235, 146, 114, 191, 214, 239, 96, 233, 149, 45, 200, 188, 122, 10, 113, 69, 133, 239, 133, 82, 37, 39, 90, 39, 142, 62, 104, 178, 218, 242, 166, 159, 112, 223, 229, 2, 3, 1, 0, 1, 163, 129, 210, 48, 129, 207, 48, 29, 6, 3, 85, 29, 14, 4, 22, 4, 20, 50, 79, 86, 230, 52, 208, 176, 1, 227, 144, 210, 213, 5, 87, 153, 241, 173, 36, 21, 60, 48, 31, 6, 3, 85, 29, 1, 4, 24, 48, 22, 128, 20, 50, 79, 86, 230, 52, 208, 176, 1, 227, 144, 210, 213, 5, 87, 153, 241, 173, 36, 21, 60, 48, 12, 6, 3, 85, 29, 19, 1, 1, 255, 4, 2, 48, 0, 48, 14, 6, 3, 85, 29, 15, 1, 1, 255, 4, 4, 3, 2, 2, 244, 48, 32, 6, 3, 85, 29, 37, 1, 1, 255, 4, 22, 48, 20, 6, 8, 43, 6, 1, 5, 5, 7, 3, 1, 6, 8, 43, 6, 1, 5, 5, 7, 3, 2, 48, 77, 6, 3, 85, 29, 7, 4, 70, 48, 68, 134, 52, 104, 116, 116, 112, 58, 47, 47, 118, 109, 45, 120, 112, 45, 115, 116, 101, 118, 101, 110, 47, 85, 65, 32, 83, 116, 97, 99, 107, 84, 101, 115, 116, 32, 83, 101, 114, 118, 101, 114, 32, 40, 65, 110, 115, 105, 67, 47, 50, 48, 52, 56, 41, 130, 12, 118, 109, 45, 120, 112, 45, 115, 116, 101, 118, 101, 110, 48, 9, 6, 5, 43, 14, 3, 2, 29, 5, 0, 3, 130, 1, 1, 0, 28, 144, 243, 244, 135, 216, 10, 180, 190, 246, 50, 151, 113, 122, 20, 153, 138, 185, 161, 115, 98, 253, 148, 11, 135, 161, 186, 127, 30, 199, 238, 185, 120, 120, 135, 31, 104, 9, 152, 82, 231, 87, 247, 86, 68, 229, 174, 209, 103, 14, 122, 37, 242, 250, 14, 240, 254, 64, 59, 30, 107, 130, 181, 221, 82, 156, 142, 190, 169, 195, 203, 148, 120, 35, 112, 100, 195, 223, 91, 161, 123, 249, 136, 207, 125, 112, 142, 100, 26, 244, 127, 10, 179, 42, 79, 237, 152, 168, 132, 37, 226, 161, 71, 100, 124, 248, 143, 37, 166, 96, 106, 195, 6, 147, 245, 129, 201, 57, 101, 188, 64, 100, 227, 145, 178, 234, 213, 223, 120, 134, 158, 140, 232, 147, 66, 71, 165, 190, 187, 79, 132, 200, 243, 187, 147, 195, 252, 7, 129, 18, 138, 252, 10, 219, 9, 21, 55, 82, 26, 211, 6, 215, 23, 235, 177, 25, 18, 122, 101, 26, 200, 54, 17, 195, 127, 105, 6, 175, 205, 223, 143, 10, 115, 231, 217, 115, 254, 211, 151, 83, 167, 116, 34, 33, 178, 11, 176, 19, 203, 194, 118, 252, 63, 160, 188, 83, 149, 108, 93, 65, 171, 97, 63, 38, 175, 60, 214, 157, 168, 210, 243, 10, 137, 211, 196, 46, 73, 175, 100, 199, 84, 22, 138, 164, 253, 189, 119, 66, 206, 160, 193, 191, 197, 64, 46, 181, 209, 33, 19, 16, 217, 151, 78, 255, 111, 74],
+                                        message_security_mode: 0x00000002,
+                                        security_policy_uri: String::from("http://opcfoundation.org/UA/SecurityPolicy#Basic128Rsa15"),
+                                        user_identity_tokens: OPCUAUserTokenPolicies {
+                                            array_size: 1,
+                                            user_token_policies: vec![
+                                                OPCUAUserTokenPolicy {
+                                                    policy_id: b'0',
+                                                    user_token_type: 0x00000000,
+                                                    issued_token_type: String::new(),
+                                                    issuer_endpoint_url: String::new(),
+                                                    security_policy_uri: String::new(),
+                                                },
+                                            ],
+                                        },
+                                        transport_profile_uri: String::from("http://opcfoundation.org/UA/profiles/transport/uatcp"),
+                                        security_level: 0,
+                                    },
+                                    OPCUAEndpointDescription {
+                                        endpoint_url: String::from("opc.tcp://vm-xp-steven:12001/StackTestServer/AnsiC/2048"),
+                                        server: OPCUAApplicationDescription {
+                                            application_uri: String::from("http://vm-xp-steven/UA StackTest Server (AnsiC/2048)"),
+                                            product_uri: String::new(),
+                                            application_name: OPCUALocalizedText {
+                                                encoding_mask: 0x02,
+                                                text: String::from("UA StackTest Server (AnsiC/2048)"),
+                                            },
+                                            application_type: 0,
+                                            gateway_server_uri: String::new(),
+                                            discovery_profile_uri: String::new(),
+                                            discovery_urls: OPCUAStringArray {
+                                                array_size: 1,
+                                                array_value: vec![
+                                                    String::from("opc.tcp://vm-xp-steven:12001/StackTestServer/AnsiC/2048"),
+                                                ],
+                                            },
+                                        },
+                                        server_certificate: vec![48, 130, 3, 231, 48, 130, 2, 211, 160, 3, 2, 1, 2, 2, 16, 7, 51, 173, 50, 89, 170, 156, 131, 75, 107, 220, 132, 126, 188, 151, 86, 48, 9, 6, 5, 43, 14, 3, 2, 29, 5, 0, 48, 73, 49, 28, 48, 26, 6, 10, 9, 146, 38, 137, 147, 242, 44, 100, 1, 25, 22, 12, 118, 109, 45, 120, 112, 45, 115, 116, 101, 118, 101, 110, 49, 41, 48, 39, 6, 3, 85, 4, 3, 19, 32, 85, 65, 32, 83, 116, 97, 99, 107, 84, 101, 115, 116, 32, 83, 101, 114, 118, 101, 114, 32, 40, 65, 110, 115, 105, 67, 47, 50, 48, 52, 56, 41, 48, 30, 23, 13, 48, 57, 48, 56, 49, 55, 49, 56, 49, 54, 51, 54, 90, 23, 13, 49, 57, 48, 56, 49, 55, 49, 56, 49, 54, 51, 54, 90, 48, 73, 49, 28, 48, 26, 6, 10, 9, 146, 38, 137, 147, 242, 44, 100, 1, 25, 22, 12, 118, 109, 45, 120, 112, 45, 115, 116, 101, 118, 101, 110, 49, 41, 48, 39, 6, 3, 85, 4, 3, 19, 32, 85, 65, 32, 83, 116, 97, 99, 107, 84, 101, 115, 116, 32, 83, 101, 114, 118, 101, 114, 32, 40, 65, 110, 115, 105, 67, 47, 50, 48, 52, 56, 41, 48, 130, 1, 34, 48, 13, 6, 9, 42, 134, 72, 134, 247, 13, 1, 1, 1, 5, 0, 3, 130, 1, 15, 0, 48, 130, 1, 10, 2, 130, 1, 1, 0, 140, 89, 34, 103, 103, 72, 248, 223, 251, 101, 49, 91, 103, 141, 158, 215, 122, 211, 115, 34, 0, 58, 107, 193, 183, 167, 121, 252, 121, 41, 140, 204, 211, 245, 42, 206, 185, 200, 139, 181, 213, 179, 159, 60, 228, 121, 193, 167, 133, 45, 78, 75, 28, 8, 46, 160, 90, 134, 48, 7, 145, 77, 6, 72, 180, 30, 20, 158, 107, 163, 178, 207, 61, 128, 90, 158, 185, 122, 192, 107, 125, 48, 5, 170, 182, 77, 206, 62, 78, 210, 39, 242, 97, 91, 44, 198, 132, 251, 242, 140, 73, 208, 126, 80, 135, 130, 31, 235, 176, 114, 42, 229, 163, 112, 240, 65, 248, 222, 61, 124, 57, 93, 192, 237, 5, 194, 210, 155, 106, 84, 111, 215, 149, 197, 20, 193, 214, 126, 9, 53, 214, 206, 74, 64, 49, 11, 35, 223, 44, 177, 224, 50, 192, 160, 200, 203, 179, 76, 4, 136, 32, 185, 140, 102, 27, 147, 246, 58, 5, 219, 88, 48, 117, 59, 29, 130, 17, 56, 47, 203, 93, 107, 136, 180, 64, 160, 60, 156, 131, 68, 62, 251, 19, 125, 193, 216, 67, 54, 250, 213, 91, 216, 118, 19, 153, 95, 46, 72, 138, 128, 120, 111, 127, 110, 82, 105, 164, 39, 47, 119, 149, 235, 146, 114, 191, 214, 239, 96, 233, 149, 45, 200, 188, 122, 10, 113, 69, 133, 239, 133, 82, 37, 39, 90, 39, 142, 62, 104, 178, 218, 242, 166, 159, 112, 223, 229, 2, 3, 1, 0, 1, 163, 129, 210, 48, 129, 207, 48, 29, 6, 3, 85, 29, 14, 4, 22, 4, 20, 50, 79, 86, 230, 52, 208, 176, 1, 227, 144, 210, 213, 5, 87, 153, 241, 173, 36, 21, 60, 48, 31, 6, 3, 85, 29, 1, 4, 24, 48, 22, 128, 20, 50, 79, 86, 230, 52, 208, 176, 1, 227, 144, 210, 213, 5, 87, 153, 241, 173, 36, 21, 60, 48, 12, 6, 3, 85, 29, 19, 1, 1, 255, 4, 2, 48, 0, 48, 14, 6, 3, 85, 29, 15, 1, 1, 255, 4, 4, 3, 2, 2, 244, 48, 32, 6, 3, 85, 29, 37, 1, 1, 255, 4, 22, 48, 20, 6, 8, 43, 6, 1, 5, 5, 7, 3, 1, 6, 8, 43, 6, 1, 5, 5, 7, 3, 2, 48, 77, 6, 3, 85, 29, 7, 4, 70, 48, 68, 134, 52, 104, 116, 116, 112, 58, 47, 47, 118, 109, 45, 120, 112, 45, 115, 116, 101, 118, 101, 110, 47, 85, 65, 32, 83, 116, 97, 99, 107, 84, 101, 115, 116, 32, 83, 101, 114, 118, 101, 114, 32, 40, 65, 110, 115, 105, 67, 47, 50, 48, 52, 56, 41, 130, 12, 118, 109, 45, 120, 112, 45, 115, 116, 101, 118, 101, 110, 48, 9, 6, 5, 43, 14, 3, 2, 29, 5, 0, 3, 130, 1, 1, 0, 28, 144, 243, 244, 135, 216, 10, 180, 190, 246, 50, 151, 113, 122, 20, 153, 138, 185, 161, 115, 98, 253, 148, 11, 135, 161, 186, 127, 30, 199, 238, 185, 120, 120, 135, 31, 104, 9, 152, 82, 231, 87, 247, 86, 68, 229, 174, 209, 103, 14, 122, 37, 242, 250, 14, 240, 254, 64, 59, 30, 107, 130, 181, 221, 82, 156, 142, 190, 169, 195, 203, 148, 120, 35, 112, 100, 195, 223, 91, 161, 123, 249, 136, 207, 125, 112, 142, 100, 26, 244, 127, 10, 179, 42, 79, 237, 152, 168, 132, 37, 226, 161, 71, 100, 124, 248, 143, 37, 166, 96, 106, 195, 6, 147, 245, 129, 201, 57, 101, 188, 64, 100, 227, 145, 178, 234, 213, 223, 120, 134, 158, 140, 232, 147, 66, 71, 165, 190, 187, 79, 132, 200, 243, 187, 147, 195, 252, 7, 129, 18, 138, 252, 10, 219, 9, 21, 55, 82, 26, 211, 6, 215, 23, 235, 177, 25, 18, 122, 101, 26, 200, 54, 17, 195, 127, 105, 6, 175, 205, 223, 143, 10, 115, 231, 217, 115, 254, 211, 151, 83, 167, 116, 34, 33, 178, 11, 176, 19, 203, 194, 118, 252, 63, 160, 188, 83, 149, 108, 93, 65, 171, 97, 63, 38, 175, 60, 214, 157, 168, 210, 243, 10, 137, 211, 196, 46, 73, 175, 100, 199, 84, 22, 138, 164, 253, 189, 119, 66, 206, 160, 193, 191, 197, 64, 46, 181, 209, 33, 19, 16, 217, 151, 78, 255, 111, 74],
+                                        message_security_mode: 0x00000003,
+                                        security_policy_uri: String::from("http://opcfoundation.org/UA/SecurityPolicy#Basic256"),
+                                        user_identity_tokens: OPCUAUserTokenPolicies {
+                                            array_size: 1,
+                                            user_token_policies: vec![
+                                                OPCUAUserTokenPolicy {
+                                                    policy_id: b'0',
+                                                    user_token_type: 0x00000000,
+                                                    issued_token_type: String::new(),
+                                                    issuer_endpoint_url: String::new(),
+                                                    security_policy_uri: String::new(),
+                                                },
+                                            ],
+                                        },
+                                        transport_profile_uri: String::from("http://opcfoundation.org/UA/profiles/transport/uatcp"),
+                                        security_level: 0,
+                                    },
+                                    OPCUAEndpointDescription {
+                                        endpoint_url: String::from("opc.tcp://vm-xp-steven:12001/StackTestServer/AnsiC/2048"),
+                                        server: OPCUAApplicationDescription {
+                                            application_uri: String::from("http://vm-xp-steven/UA StackTest Server (AnsiC/2048)"),
+                                            product_uri: String::new(),
+                                            application_name: OPCUALocalizedText {
+                                                encoding_mask: 0x02,
+                                                text: String::from("UA StackTest Server (AnsiC/2048)"),
+                                            },
+                                            application_type: 0,
+                                            gateway_server_uri: String::new(),
+                                            discovery_profile_uri: String::new(),
+                                            discovery_urls: OPCUAStringArray {
+                                                array_size: 1,
+                                                array_value: vec![
+                                                    String::from("opc.tcp://vm-xp-steven:12001/StackTestServer/AnsiC/2048"),
+                                                ],
+                                            },
+                                        },
+                                        server_certificate: vec![48, 130, 3, 231, 48, 130, 2, 211, 160, 3, 2, 1, 2, 2, 16, 7, 51, 173, 50, 89, 170, 156, 131, 75, 107, 220, 132, 126, 188, 151, 86, 48, 9, 6, 5, 43, 14, 3, 2, 29, 5, 0, 48, 73, 49, 28, 48, 26, 6, 10, 9, 146, 38, 137, 147, 242, 44, 100, 1, 25, 22, 12, 118, 109, 45, 120, 112, 45, 115, 116, 101, 118, 101, 110, 49, 41, 48, 39, 6, 3, 85, 4, 3, 19, 32, 85, 65, 32, 83, 116, 97, 99, 107, 84, 101, 115, 116, 32, 83, 101, 114, 118, 101, 114, 32, 40, 65, 110, 115, 105, 67, 47, 50, 48, 52, 56, 41, 48, 30, 23, 13, 48, 57, 48, 56, 49, 55, 49, 56, 49, 54, 51, 54, 90, 23, 13, 49, 57, 48, 56, 49, 55, 49, 56, 49, 54, 51, 54, 90, 48, 73, 49, 28, 48, 26, 6, 10, 9, 146, 38, 137, 147, 242, 44, 100, 1, 25, 22, 12, 118, 109, 45, 120, 112, 45, 115, 116, 101, 118, 101, 110, 49, 41, 48, 39, 6, 3, 85, 4, 3, 19, 32, 85, 65, 32, 83, 116, 97, 99, 107, 84, 101, 115, 116, 32, 83, 101, 114, 118, 101, 114, 32, 40, 65, 110, 115, 105, 67, 47, 50, 48, 52, 56, 41, 48, 130, 1, 34, 48, 13, 6, 9, 42, 134, 72, 134, 247, 13, 1, 1, 1, 5, 0, 3, 130, 1, 15, 0, 48, 130, 1, 10, 2, 130, 1, 1, 0, 140, 89, 34, 103, 103, 72, 248, 223, 251, 101, 49, 91, 103, 141, 158, 215, 122, 211, 115, 34, 0, 58, 107, 193, 183, 167, 121, 252, 121, 41, 140, 204, 211, 245, 42, 206, 185, 200, 139, 181, 213, 179, 159, 60, 228, 121, 193, 167, 133, 45, 78, 75, 28, 8, 46, 160, 90, 134, 48, 7, 145, 77, 6, 72, 180, 30, 20, 158, 107, 163, 178, 207, 61, 128, 90, 158, 185, 122, 192, 107, 125, 48, 5, 170, 182, 77, 206, 62, 78, 210, 39, 242, 97, 91, 44, 198, 132, 251, 242, 140, 73, 208, 126, 80, 135, 130, 31, 235, 176, 114, 42, 229, 163, 112, 240, 65, 248, 222, 61, 124, 57, 93, 192, 237, 5, 194, 210, 155, 106, 84, 111, 215, 149, 197, 20, 193, 214, 126, 9, 53, 214, 206, 74, 64, 49, 11, 35, 223, 44, 177, 224, 50, 192, 160, 200, 203, 179, 76, 4, 136, 32, 185, 140, 102, 27, 147, 246, 58, 5, 219, 88, 48, 117, 59, 29, 130, 17, 56, 47, 203, 93, 107, 136, 180, 64, 160, 60, 156, 131, 68, 62, 251, 19, 125, 193, 216, 67, 54, 250, 213, 91, 216, 118, 19, 153, 95, 46, 72, 138, 128, 120, 111, 127, 110, 82, 105, 164, 39, 47, 119, 149, 235, 146, 114, 191, 214, 239, 96, 233, 149, 45, 200, 188, 122, 10, 113, 69, 133, 239, 133, 82, 37, 39, 90, 39, 142, 62, 104, 178, 218, 242, 166, 159, 112, 223, 229, 2, 3, 1, 0, 1, 163, 129, 210, 48, 129, 207, 48, 29, 6, 3, 85, 29, 14, 4, 22, 4, 20, 50, 79, 86, 230, 52, 208, 176, 1, 227, 144, 210, 213, 5, 87, 153, 241, 173, 36, 21, 60, 48, 31, 6, 3, 85, 29, 1, 4, 24, 48, 22, 128, 20, 50, 79, 86, 230, 52, 208, 176, 1, 227, 144, 210, 213, 5, 87, 153, 241, 173, 36, 21, 60, 48, 12, 6, 3, 85, 29, 19, 1, 1, 255, 4, 2, 48, 0, 48, 14, 6, 3, 85, 29, 15, 1, 1, 255, 4, 4, 3, 2, 2, 244, 48, 32, 6, 3, 85, 29, 37, 1, 1, 255, 4, 22, 48, 20, 6, 8, 43, 6, 1, 5, 5, 7, 3, 1, 6, 8, 43, 6, 1, 5, 5, 7, 3, 2, 48, 77, 6, 3, 85, 29, 7, 4, 70, 48, 68, 134, 52, 104, 116, 116, 112, 58, 47, 47, 118, 109, 45, 120, 112, 45, 115, 116, 101, 118, 101, 110, 47, 85, 65, 32, 83, 116, 97, 99, 107, 84, 101, 115, 116, 32, 83, 101, 114, 118, 101, 114, 32, 40, 65, 110, 115, 105, 67, 47, 50, 48, 52, 56, 41, 130, 12, 118, 109, 45, 120, 112, 45, 115, 116, 101, 118, 101, 110, 48, 9, 6, 5, 43, 14, 3, 2, 29, 5, 0, 3, 130, 1, 1, 0, 28, 144, 243, 244, 135, 216, 10, 180, 190, 246, 50, 151, 113, 122, 20, 153, 138, 185, 161, 115, 98, 253, 148, 11, 135, 161, 186, 127, 30, 199, 238, 185, 120, 120, 135, 31, 104, 9, 152, 82, 231, 87, 247, 86, 68, 229, 174, 209, 103, 14, 122, 37, 242, 250, 14, 240, 254, 64, 59, 30, 107, 130, 181, 221, 82, 156, 142, 190, 169, 195, 203, 148, 120, 35, 112, 100, 195, 223, 91, 161, 123, 249, 136, 207, 125, 112, 142, 100, 26, 244, 127, 10, 179, 42, 79, 237, 152, 168, 132, 37, 226, 161, 71, 100, 124, 248, 143, 37, 166, 96, 106, 195, 6, 147, 245, 129, 201, 57, 101, 188, 64, 100, 227, 145, 178, 234, 213, 223, 120, 134, 158, 140, 232, 147, 66, 71, 165, 190, 187, 79, 132, 200, 243, 187, 147, 195, 252, 7, 129, 18, 138, 252, 10, 219, 9, 21, 55, 82, 26, 211, 6, 215, 23, 235, 177, 25, 18, 122, 101, 26, 200, 54, 17, 195, 127, 105, 6, 175, 205, 223, 143, 10, 115, 231, 217, 115, 254, 211, 151, 83, 167, 116, 34, 33, 178, 11, 176, 19, 203, 194, 118, 252, 63, 160, 188, 83, 149, 108, 93, 65, 171, 97, 63, 38, 175, 60, 214, 157, 168, 210, 243, 10, 137, 211, 196, 46, 73, 175, 100, 199, 84, 22, 138, 164, 253, 189, 119, 66, 206, 160, 193, 191, 197, 64, 46, 181, 209, 33, 19, 16, 217, 151, 78, 255, 111, 74],
+                                        message_security_mode: 0x00000002,
+                                        security_policy_uri: String::from("http://opcfoundation.org/UA/SecurityPolicy#Basic256"),
+                                        user_identity_tokens: OPCUAUserTokenPolicies {
+                                            array_size: 1,
+                                            user_token_policies: vec![
+                                                OPCUAUserTokenPolicy {
+                                                    policy_id: b'0',
+                                                    user_token_type: 0x00000000,
+                                                    issued_token_type: String::new(),
+                                                    issuer_endpoint_url: String::new(),
+                                                    security_policy_uri: String::new(),
+                                                },
+                                            ],
+                                        },
+                                        transport_profile_uri: String::from("http://opcfoundation.org/UA/profiles/transport/uatcp"),
+                                        security_level: 0,
+                                    },
+                                ],
+                            },
+                            server_software_certificates: OPCUASignatureSoftwareCertificates {
+                                array_size: 0,
+                                signed_software_certificates: vec![],
+                            },
+                            server_signature: OPCUASignatureData {
+                                algorithm: String::new(),
+                                signature: String::new(),
+                            },
+                            max_request_message_size: 4194304,
+                        }),
+                    }),
+                });
+            },
+            Err(_) => {
+                panic!("should not reach here");
+            }
+        }
+    }
+
+    #[test]
+    fn test_parse_opcua_error_message() {
+        let pcap = include_bytes!("pcaps/opcua/opcua_error_message.pcap");
+        let payload = &pcap[24+16+66..];
+        match parse_opcua(payload) {
+            Ok((rem, opc_ua)) => {
+                assert_eq!(rem.len(), 0);
+                assert_eq!(opc_ua, OPCUA {
+                    header: OPCUAHeader::ERROR(OPCUAErrorHeader {
+                        message_type: String::from("ERR"),
+                        chunk_type: b'F',
+                        message_size: 16,
+                        error: 0x80020000,
+                        reason: String::new(),
+                    }),
+                    contents: OPCUAContents::NONE,
                 });
             },
             Err(_) => {
