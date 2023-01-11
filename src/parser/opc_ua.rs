@@ -1,6 +1,9 @@
-use nom7::{IResult, sequence::tuple, bytes::complete::take, number::complete::{le_u8, le_u32, le_u16}, multi::{length_data, count}};
+use nom7::{IResult, sequence::tuple, bytes::complete::take, number::complete::{le_u8, le_u32, le_u16, le_i64}, multi::{length_data, count}, AsBytes};
+use chrono::prelude::*;
 
 const OPCUA_MESSAGE_TYPE_LENGTH: usize = 3;
+const WINDOWS_TICK: i64 = 10000000;
+const SEC_TO_UNIX_EPOCH: i64 = 11644473600;
 
 #[derive(Debug, PartialEq)]
 pub struct OPCUAHelloHeader {
@@ -68,7 +71,7 @@ pub struct OPCUAMessageAdditionalHeader {
 #[derive(Debug, PartialEq)]
 pub struct OPCUAMessageRequestHeader {
     authorization_token: u16,
-    timestamp: Vec<u8>,
+    timestamp: String,
     request_handle: u32,
     return_diagnostic: u32,
     audit_entry_id: String,
@@ -78,7 +81,7 @@ pub struct OPCUAMessageRequestHeader {
 
 #[derive(Debug, PartialEq)]
 pub struct OPCUAMessageResponseHeader {
-    timestamp: Vec<u8>,
+    timestamp: String,
     request_handle: u32,
     service_result: u32,
     service_diagnostics: u8,
@@ -90,7 +93,7 @@ pub struct OPCUAMessageResponseHeader {
 pub struct OPCUAOpenMessageSecurityToken {
     channel_id: u32,
     token_id: u32,
-    created_at: Vec<u8>,
+    created_at: String,
     revised_lifetime: u32,
 }
 
@@ -485,13 +488,13 @@ pub fn parse_opcua_message_security_token(input: &[u8]) -> IResult<&[u8], OPCUAO
     )) = tuple((
         le_u32,
         le_u32,
-        take(8usize),
+        translate_timestamp_to_string,
         le_u32,
     ))(input)?;
     Ok((rem, OPCUAOpenMessageSecurityToken {
         channel_id,
         token_id,
-        created_at: created_at.to_vec(),
+        created_at,
         revised_lifetime,
     }))
 }
@@ -509,6 +512,15 @@ pub fn parse_opcua_message_identifier_numeric(input: &[u8]) -> IResult<&[u8], u1
     Ok((rem, identifier_numeric))
 }
 
+pub fn translate_timestamp_to_string(input: &[u8]) -> IResult<&[u8], String> {
+    let (rem, origin_timestamp_millis) = le_i64(input)?;
+    let unix_timestamp = origin_timestamp_millis / WINDOWS_TICK - SEC_TO_UNIX_EPOCH;
+    let nt = NaiveDateTime::from_timestamp_opt(unix_timestamp, 0).unwrap();
+    let utc_datetime: DateTime<Utc> = DateTime::from_utc(nt, Utc);
+    let res = utc_datetime.format("%Y-%m-%d %H:%M:%S").to_string();
+    Ok((rem, res))
+}
+
 pub fn parse_opcua_message_request_header(input: &[u8]) -> IResult<&[u8], OPCUAMessageRequestHeader> {
     let (rem, (
         authorization_token,
@@ -520,7 +532,7 @@ pub fn parse_opcua_message_request_header(input: &[u8]) -> IResult<&[u8], OPCUAM
         addition_header,
     )) = tuple((
         parse_opcua_message_identifier_numeric,
-        take(8usize),
+        translate_timestamp_to_string,
         le_u32,
         le_u32,
         parse_opcua_null_string,
@@ -529,7 +541,7 @@ pub fn parse_opcua_message_request_header(input: &[u8]) -> IResult<&[u8], OPCUAM
     ))(input)?;
     Ok((rem, OPCUAMessageRequestHeader {
         authorization_token,
-        timestamp: timestamp.to_vec(),
+        timestamp,
         request_handle,
         return_diagnostic,
         audit_entry_id,
@@ -573,7 +585,7 @@ pub fn parse_opcua_message_response_header(input: &[u8]) -> IResult<&[u8], OPCUA
         string_table,
         additional_header,
     )) = tuple((
-        take(8usize),
+        translate_timestamp_to_string,
         le_u32,
         le_u32,
         le_u8,
@@ -581,7 +593,7 @@ pub fn parse_opcua_message_response_header(input: &[u8]) -> IResult<&[u8], OPCUA
         parse_opcua_message_additional_header,
     ))(input)?;
     Ok((rem, OPCUAMessageResponseHeader {
-        timestamp: timestamp.to_vec(),
+        timestamp,
         request_handle,
         service_result,
         service_diagnostics,
@@ -1214,7 +1226,7 @@ mod tests {
                             open_secure_channel_request: OPCUAOpenMessageOpenSecureChannelRequest {
                                 request_header: OPCUAMessageRequestHeader {
                                     authorization_token: 0,
-                                    timestamp: vec![0x00, 0x3c, 0x7d, 0x0c, 0x5c, 0x2b, 0xca, 0x01],
+                                    timestamp: String::from("2009-09-01 23:29:28"),
                                     request_handle: 1,
                                     return_diagnostic: 0x000003ff,
                                     audit_entry_id: String::new(),
@@ -1272,7 +1284,7 @@ mod tests {
                         message: OPCUASpecificMessage::OPEN_RESPONSE(OPCUAOpenMessageResponse {
                             open_secure_channel_response: OPCUAOpenMessageOpenSecureChannelResponse {
                                 response_header: OPCUAMessageResponseHeader {
-                                    timestamp: vec![0xed, 0xd5, 0x60, 0x57, 0x5c, 0x2b, 0xca, 0x01],
+                                    timestamp: String::from("2009-09-01 23:31:33"),
                                     request_handle: 1,
                                     service_result: 0x00000000,
                                     service_diagnostics: 0x00,
@@ -1290,7 +1302,7 @@ mod tests {
                                 security_token: OPCUAOpenMessageSecurityToken {
                                     channel_id: 6495,
                                     token_id: 1,
-                                    created_at: vec![0xed, 0xd5, 0x60, 0x57, 0x5c, 0x2b, 0xca, 0x01],
+                                    created_at: String::from("2009-09-01 23:31:33"),
                                     revised_lifetime: 3600000,
                                 },
                                 server_nonce: 1,
@@ -1331,7 +1343,7 @@ mod tests {
                         message: OPCUASpecificMessage::GET_ENDPOINT_REQUEST(OPCUAGetEndpointRequest {
                             request_header: OPCUAMessageRequestHeader {
                                 authorization_token: 0x0000,
-                                timestamp: vec![0x00, 0x3c, 0x7d, 0x0c, 0x5c, 0x2b, 0xca, 0x01],
+                                timestamp: String::from("2009-09-01 23:29:28"),
                                 request_handle: 1,
                                 return_diagnostic: 0x000003ff,
                                 audit_entry_id: String::new(),
@@ -1389,7 +1401,7 @@ mod tests {
                         },
                         message: OPCUASpecificMessage::GET_ENDPOINT_RESPONSE(OPCUAGetEndpointResponse {
                             response_header: OPCUAMessageResponseHeader {
-                                timestamp: vec![0xf5, 0x84, 0x90, 0x57, 0x5c, 0x2b, 0xca, 0x01],
+                                timestamp: String::from("2009-09-01 23:31:33"),
                                 request_handle: 1,
                                 service_result: 0x00000000,
                                 service_diagnostics: 0x00,
@@ -1629,7 +1641,7 @@ mod tests {
                         message: OPCUASpecificMessage::CREATE_SESSION_REQUEST(OPCUACreateSessionRequest {
                             request_header: OPCUAMessageRequestHeader {
                                 authorization_token: 0x0000,
-                                timestamp: vec![0x00, 0x3c, 0x7d, 0x0c, 0x5c, 0x2b, 0xca, 0x01],
+                                timestamp: String::from("2009-09-01 23:29:28"),
                                 request_handle: 1,
                                 return_diagnostic: 0x000003ff,
                                 audit_entry_id: String::new(),
@@ -1707,7 +1719,7 @@ mod tests {
                         message: OPCUASpecificMessage::ACTIVATE_SESSION_REQUEST(OPCUAActivateSessionRequest {
                             request_header: OPCUAMessageRequestHeader {
                                 authorization_token: 6527,
-                                timestamp: vec![0x00, 0x3c, 0x7d, 0x0c, 0x5c, 0x2b, 0xca, 0x01],
+                                timestamp: String::from("2009-09-01 23:29:28"),
                                 request_handle: 1,
                                 return_diagnostic: 0x000003ff,
                                 audit_entry_id: String::new(),
@@ -1785,7 +1797,7 @@ mod tests {
                         },
                         message: OPCUASpecificMessage::ACTIVATE_SESSION_RESPONSE(OPCUAActivateSessionResponse {
                             response_header: OPCUAMessageResponseHeader {
-                                timestamp: vec![0x19, 0x82, 0xce, 0x57, 0x5c, 0x2b, 0xca, 0x01],
+                                timestamp: String::from("2009-09-01 23:31:34"),
                                 request_handle: 1,
                                 service_result: 0x00000000,
                                 service_diagnostics: 0x00,
@@ -1843,7 +1855,7 @@ mod tests {
                         },
                         message: OPCUASpecificMessage::CREATE_SESSION_RESPONSE(OPCUACreateSessionResponse {
                             response_header: OPCUAMessageResponseHeader {
-                                timestamp: vec![0x87, 0x83, 0xaf, 0x57, 0x5c, 0x2b, 0xca, 0x01],
+                                timestamp: String::from("2009-09-01 23:31:34"),
                                 request_handle: 1,
                                 service_result: 0x00000000,
                                 service_diagnostics: 0,
@@ -2101,5 +2113,15 @@ mod tests {
                 panic!("should not reach here");
             }
         }
+    }
+
+    #[test]
+    fn test_translate_timestamp_to_string() {
+        let raw_timestamp = [0x00, 0x3c, 0x7d, 0x0c, 0x5c, 0x2b, 0xca, 0x01];
+        let origin_timestamp_millis= i64::from_le_bytes(raw_timestamp);
+        let unix_timestamp = origin_timestamp_millis / WINDOWS_TICK - SEC_TO_UNIX_EPOCH;
+        let nt = NaiveDateTime::from_timestamp_opt(unix_timestamp, 0).unwrap();
+        let utc_datetime: DateTime<Utc> = DateTime::from_utc(nt, Utc);
+        let _res = utc_datetime.format("%Y-%m-%d %H:%M:%S").to_string();
     }
 }
