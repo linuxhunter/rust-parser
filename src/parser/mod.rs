@@ -15,3 +15,4 @@ pub mod ikev2;
 pub mod ethernet_ip;
 pub mod opc_ua;
 pub mod trdp;
+pub mod profinet_dcp;
